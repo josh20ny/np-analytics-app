@@ -1,0 +1,12 @@
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+
+# Environment file
+.env
+
+# Docker artifacts
+db_data/
