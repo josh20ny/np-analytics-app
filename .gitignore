@@ -10,3 +10,6 @@ venv/
 
 # Docker artifacts
 db_data/
+
+# Zip file to upload to ChatGPT
+*.zip

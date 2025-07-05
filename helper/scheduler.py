@@ -12,7 +12,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Base URL for your FastAPI app (override via .env if needed)
-BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
+BASE_URL = os.getenv("API_BASE_URL", "https://np-analytics-app.onrender.com")
+
 
 # Configure structured logging
 logging.basicConfig(
@@ -51,8 +52,8 @@ JOBS = [
 
 def schedule_jobs():
     for t, endpoint, label in JOBS:
-        #schedule.every().monday.at(t).do(call_api, endpoint, label)
-        schedule.every().minute.do(call_api, endpoint, label)
+        schedule.every().monday.at(t).do(call_api, endpoint, label)
+        #schedule.every().minute.do(call_api, endpoint, label)
         logging.info(f"Scheduled '{label}' at Mondays {t}")
 
 

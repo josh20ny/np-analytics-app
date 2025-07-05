@@ -114,19 +114,68 @@ def determine_service_time(iso_time: str, ministry: str):
 
 
 def summarize_checkins_by_ministry(checkins, people):
+    # initialize your counters as before
     summary = {m: defaultdict(int) for m in MINISTRY_COLUMNS.keys()}
+
     for c in checkins:
-        pid = c.get("relationships",{}).get("person",{}).get("data",{}).get("id")
+        pid = c["relationships"]["person"]["data"]["id"]
         pd = people.get(pid)
-        if not pd: continue
-        minstry = determine_ministry(pd.get("grade"), pd.get("age"))
-        svc = determine_service_time(c["attributes"]["created_at"], minstry)
-        if not minstry or not svc: continue
-        key = SERVICE_KEY_MAP.get(svc)
-        summary[minstry][f"attendance_{key}"] += 1
+        if not pd:
+            continue
+
+        ministry = determine_ministry(pd["grade"], pd["age"])
+        svc      = determine_service_time(c["attributes"]["created_at"], ministry)
+        if not ministry or not svc:
+            continue
+
+        key = SERVICE_KEY_MAP[svc]
+        # count raw attendance & new guests
+        summary[ministry][f"attendance_{key}"] += 1
         if c["attributes"].get("one_time_guest", False):
-            summary[minstry][f"new_kids_{key}"] += 1
-        # breakdowns omitted for brevity—copy original logic here
+            summary[ministry][f"new_kids_{key}"] += 1
+
+        # —— start demographic breakdowns —— #
+        gender = pd["gender"] or "other"
+
+        if ministry == "Waumba Land":
+            age = pd["age"]
+            if age is not None:
+                # bucket 0–2 vs 3–5
+                bracket = "0_2" if age <= 2 else "3_5" if age <= 5 else None
+                if bracket:
+                    summary[ministry][f"age_{bracket}_{gender}"] += 1
+
+        elif ministry in ("UpStreet", "Transit"):
+            grade = pd["grade"]
+            if grade is not None:
+                # you’ll need to map grades->key exactly as your MINISTRY_COLUMNS
+                if ministry == "UpStreet":
+                    # K–1, 2–3, 4–5
+                    if grade in (0,1):
+                        grp = "k_1"
+                    elif grade in (2,3):
+                        grp = "2_3"
+                    elif grade in (4,5):
+                        grp = "4_5"
+                    else:
+                        grp = None
+                else:  # Transit
+                    # grades 6, 7, 8
+                    if grade == 6:
+                        grp = "6"
+                    elif grade == 7:
+                        grp = "7"
+                    elif grade == 8:
+                        grp = "8"
+                    else:
+                        grp = None
+
+                if grp:
+                    summary[ministry][f"grade_{grp}_{gender}"] += 1
+
+        # InsideOut you’ll handle separately (4:30 PM), so skip here
+        # —— end demographic breakdowns —— #
+
     return summary
 
 

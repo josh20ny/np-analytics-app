@@ -38,3 +38,4 @@ class Settings:
 # single settings instance you can import everywhere
 settings = Settings()
 
+
