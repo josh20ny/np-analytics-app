@@ -1,7 +1,7 @@
-# dashboard/widgets.py
 import streamlit as st
 import matplotlib.pyplot as plt
 import pandas as pd
+from datetime import datetime
 
 
 def overlay_years_chart(df: pd.DataFrame, title: str):
@@ -11,7 +11,6 @@ def overlay_years_chart(df: pd.DataFrame, title: str):
     """
     st.subheader(title)
     years = sorted(df['year'].unique())
-    # Use title in key to ensure uniqueness
     pick = st.multiselect(
         'Years to compare',
         years,
@@ -25,21 +24,49 @@ def overlay_years_chart(df: pd.DataFrame, title: str):
 
 def weekly_yoy_table(df: pd.DataFrame, title: str):
     """
-    Displays a table of last year vs this year and YoY % by ISO week.
+    Displays a table with Date, Last Year value, This Year value, and YoY %.
+    Hides future weeks (based on current-year dates) and orders the most recent at the top.
     """
     st.subheader(title)
-    tbl = df.groupby(['week', 'year'])['value'].sum().unstack('year').fillna(0)
-    years = sorted(tbl.columns)
+    # Determine years present
+    years = sorted(df['year'].unique())
     if len(years) < 2:
         st.write("Not enough years of data for YoY.")
         return
     last, now = years[-2], years[-1]
-    comp = tbl[[last, now]].copy()
+
+    # Aggregate values by ISO week and year
+    weekly = df.groupby(['week','year'])['value'].sum().unstack('year').fillna(0)
+    comp = weekly[[last, now]].copy()
+    # Compute YoY percentage
     comp['YoY %'] = (comp[now] - comp[last]) / comp[last] * 100
+
+    # Map ISO week to the actual most recent date in current year
+    dates = df[df['year'] == now].groupby('week')['date'].max()
+    # Reset index to bring week into column, map to dates, parse dates
+    comp = comp.reset_index().rename(columns={'week': 'ISO Week'})
+    comp['Date'] = comp['ISO Week'].map(dates)
+    comp['Date_parsed'] = pd.to_datetime(comp['Date'], format='%B %d, %Y')
+
+    # Filter out any future dates beyond today
+    today = datetime.today()
+    comp = comp[comp['Date_parsed'] <= today]
+
+    # Prepare display table sorted most recent first
+    display = comp[['Date', last, now, 'YoY %']].copy()
+    display = display.set_index('Date')
+    # Sort index as parsed dates in descending order
+    display.index = pd.to_datetime(display.index, format='%B %d, %Y')
+    display = display.sort_index(ascending=False)
+    # Reformat index back to string
+    display.index = display.index.strftime('%B %d, %Y')
+    display = display.reset_index().rename(columns={'index': 'Date'})
+
+    # Style and render
     styled = (
-        comp.style
-            .format({last: '{:,.0f}', now: '{:,.0f}', 'YoY %': '{:+.1f}%'} )
-            .applymap(lambda v: 'background-color: #40e060' if v > 0 else 'background-color: #d9374a', subset=['YoY %'])
+        display.style
+               .format({last: '{:,.0f}', now: '{:,.0f}', 'YoY %': '{:+.1f}%'} )
+               .applymap(lambda v: 'background-color: #40e060' if isinstance(v, (int, float)) and v > 0 else 'background-color: #d9374a', subset=['YoY %'])
     )
     st.dataframe(styled, use_container_width=True)
 
@@ -48,7 +75,6 @@ def pie_chart(_df, labels: list, values: list, title: str):
     """
     Pie chart from lists of labels and values, sanitizing NaNs.
     """
-    # Replace NaN with zero and convert to int
     clean_values = [0 if pd.isna(v) else int(v) for v in values]
     total = sum(clean_values)
     if total == 0:

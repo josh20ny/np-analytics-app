@@ -11,14 +11,24 @@ engine = create_engine(os.getenv("DATABASE_URL"))
 @st.cache_data(ttl=3600)
 def load_table(table_name: str, date_col: str, value_col: str) -> pd.DataFrame:
     """
-    Generic loader: fetches full table, parses date_col, sorts, and adds year/week columns
-    Isolates the value_col and renames columns to date/value/year/week
+    Generic loader: fetches full table, parses date_col, sorts, and adds year/week columns.
+    Also formats the date into a human-readable string "Month dd, yyyy" in the 'date' column for display.
+    Isolates the value_col and renames columns to date/value/year/week.
     """
-    df = pd.read_sql(f"SELECT * FROM {table_name}", engine, parse_dates=[date_col])
+    # read full table, parse the date column
+    df = pd.read_sql(
+        f"SELECT * FROM {table_name}",
+        engine,
+        parse_dates=[date_col]
+    )
     df = df.sort_values(date_col)
+    # extract year & week for plotting
     df['year'] = df[date_col].dt.year
     df['week'] = df[date_col].dt.isocalendar().week
-    # Select and rename for easy plotting
-    return df[[date_col, value_col, 'year', 'week']].rename(
+    # rename and isolate
+    df = df[[date_col, value_col, 'year', 'week']].rename(
         columns={date_col: 'date', value_col: 'value'}
     )
+    # format the date for display (Month dd, yyyy)
+    df['date'] = pd.to_datetime(df['date']).dt.strftime('%B %d, %Y')
+    return df
