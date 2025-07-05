@@ -1,49 +1,51 @@
 import requests
 import psycopg2
 from datetime import datetime, timedelta, time
+from zoneinfo import ZoneInfo
 from collections import defaultdict
-from app.config import settings
 from fastapi import APIRouter
+
+from app.config import settings
 from ..config import settings
-from ..db import get_conn
+from ..db import get_conn  # if you use this elsewhere
 
 router = APIRouter(prefix="/planning-center/checkins", tags=["Planning Center"])
 
 SERVICE_KEY_MAP = {
-    "9:30 AM": "930",
+    "9:30 AM":  "930",
     "11:00 AM": "1100",
-    "4:30 PM": "1630"
+    "4:30 PM":  "1630",
 }
 
 MINISTRY_COLUMNS = {
     "Waumba Land": [
         "attendance_930", "attendance_1100", "total_attendance",
-        "total_new_kids", "notes",
-        "age_0_2_male", "age_0_2_female",
-        "age_3_5_male", "age_3_5_female"
+        "total_new_kids",  "notes",
+        "age_0_2_male",    "age_0_2_female",
+        "age_3_5_male",    "age_3_5_female",
     ],
     "UpStreet": [
         "attendance_930", "attendance_1100", "total_attendance",
         "total_new_kids", "notes",
         "grade_k_1_male", "grade_k_1_female",
         "grade_2_3_male", "grade_2_3_female",
-        "grade_4_5_male", "grade_4_5_female"
+        "grade_4_5_male", "grade_4_5_female",
     ],
     "Transit": [
         "attendance_930", "attendance_1100", "total_attendance",
         "total_new_kids", "notes",
-        "grade_6_male", "grade_6_female",
-        "grade_7_male", "grade_7_female",
-        "grade_8_male", "grade_8_female"
+        "grade_6_male",   "grade_6_female",
+        "grade_7_male",   "grade_7_female",
+        "grade_8_male",   "grade_8_female",
     ],
     "InsideOut": [
-        "total_attendance", "new_students", "notes"
-    ]
+        "total_attendance", "new_students", "notes",
+    ],
 }
 
 
 def get_last_sunday():
-    today = datetime.now()
+    today = datetime.now(tz=ZoneInfo("America/Chicago"))
     last_sunday = today - timedelta(days=(today.weekday() + 1) % 7)
     return last_sunday.date()
 
@@ -54,11 +56,11 @@ def fetch_all_checkins(date: datetime):
     params = {
         "include": "person,event,location",
         "where[created_at][gte]": f"{date}T00:00:00Z",
-        "where[created_at][lte]": f"{date}T23:59:59Z"
+        "where[created_at][lte]": f"{date}T23:59:59Z",
     }
     checkins, included = [], []
     while url:
-        resp = requests.get(url, auth=auth, headers={"Accept":"application/json"}, params=params)
+        resp = requests.get(url, auth=auth, headers={"Accept": "application/json"}, params=params)
         resp.raise_for_status()
         data = resp.json()
         checkins.extend(data.get("data", []))
@@ -72,19 +74,21 @@ def parse_people_data(included):
     people = {}
     for item in included:
         if item.get("type") == "Person":
-            pid = item.get("id")
+            pid = item["id"]
             attrs = item.get("attributes", {})
-            grade = None
+            # parse grade
             try:
                 grade = int(attrs.get("grade"))
-            except:
-                pass
+            except Exception:
+                grade = None
+            # parse birthdate → age
             age = None
             bd = attrs.get("birthdate")
             if bd:
                 try:
-                    age = (datetime.now().date() - datetime.fromisoformat(bd).date()).days // 365
-                except:
+                    born = datetime.fromisoformat(bd).date()
+                    age = (datetime.now().date() - born).days // 365
+                except Exception:
                     pass
             gender = attrs.get("gender", "Other").lower() if attrs.get("gender") else "other"
             people[pid] = {"grade": grade, "age": age, "gender": gender}
@@ -93,33 +97,42 @@ def parse_people_data(included):
 
 def determine_ministry(grade, age):
     if grade is not None:
-        if 0 <= grade <= 4: return "UpStreet"
-        if 5 <= grade <= 8: return "Transit"
-        if 9 <= grade <= 12: return "InsideOut"
+        if 0 <= grade <= 4:
+            return "UpStreet"
+        if 5 <= grade <= 8:
+            return "Transit"
+        if 9 <= grade <= 12:
+            return "InsideOut"
     if age is not None:
-        if age <= 5: return "Waumba Land"
-        if 6 <= age <= 10: return "UpStreet"
+        if age <= 5:
+            return "Waumba Land"
+        if 6 <= age <= 10:
+            return "UpStreet"
     return None
 
 
 def determine_service_time(iso_time: str, ministry: str):
-    dt = datetime.fromisoformat(iso_time.replace("Z","+00:00")).astimezone()
+    # Parse as UTC then convert into Chicago time
+    dt = datetime.fromisoformat(iso_time.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Chicago"))
     t = dt.time()
+
     if ministry == "InsideOut":
-        if time(15,45) <= t <= time(17,0): return "4:30 PM"
+        if time(15, 45) <= t <= time(17, 0):
+            return "4:30 PM"
     else:
-        if time(9,0) <= t <= time(10,0): return "9:30 AM"
-        if time(10,30) <= t <= time(11,30): return "11:00 AM"
+        if time(9, 0) <= t <= time(10, 0):
+            return "9:30 AM"
+        if time(10, 30) <= t <= time(11, 30):
+            return "11:00 AM"
     return None
 
 
 def summarize_checkins_by_ministry(checkins, people):
-    # initialize your counters as before
     summary = {m: defaultdict(int) for m in MINISTRY_COLUMNS.keys()}
 
     for c in checkins:
         pid = c["relationships"]["person"]["data"]["id"]
-        pd = people.get(pid)
+        pd  = people.get(pid)
         if not pd:
             continue
 
@@ -129,18 +142,15 @@ def summarize_checkins_by_ministry(checkins, people):
             continue
 
         key = SERVICE_KEY_MAP[svc]
-        # count raw attendance & new guests
         summary[ministry][f"attendance_{key}"] += 1
         if c["attributes"].get("one_time_guest", False):
             summary[ministry][f"new_kids_{key}"] += 1
 
-        # —— start demographic breakdowns —— #
-        gender = pd["gender"] or "other"
-
+        # demographic breakdowns (optional) …
+        gender = pd["gender"]
         if ministry == "Waumba Land":
             age = pd["age"]
             if age is not None:
-                # bucket 0–2 vs 3–5
                 bracket = "0_2" if age <= 2 else "3_5" if age <= 5 else None
                 if bracket:
                     summary[ministry][f"age_{bracket}_{gender}"] += 1
@@ -148,19 +158,16 @@ def summarize_checkins_by_ministry(checkins, people):
         elif ministry in ("UpStreet", "Transit"):
             grade = pd["grade"]
             if grade is not None:
-                # you’ll need to map grades->key exactly as your MINISTRY_COLUMNS
                 if ministry == "UpStreet":
-                    # K–1, 2–3, 4–5
-                    if grade in (0,1):
+                    if grade in (0, 1):
                         grp = "k_1"
-                    elif grade in (2,3):
+                    elif grade in (2, 3):
                         grp = "2_3"
-                    elif grade in (4,5):
+                    elif grade in (4, 5):
                         grp = "4_5"
                     else:
                         grp = None
                 else:  # Transit
-                    # grades 6, 7, 8
                     if grade == 6:
                         grp = "6"
                     elif grade == 7:
@@ -169,18 +176,13 @@ def summarize_checkins_by_ministry(checkins, people):
                         grp = "8"
                     else:
                         grp = None
-
                 if grp:
                     summary[ministry][f"grade_{grp}_{gender}"] += 1
-
-        # InsideOut you’ll handle separately (4:30 PM), so skip here
-        # —— end demographic breakdowns —— #
 
     return summary
 
 
 def insert_summary_into_db(ministry: str, data: dict):
-    # map ministry → table name
     table_map = {
         "Waumba Land": "waumbaland_attendance",
         "UpStreet":     "upstreet_attendance",
@@ -188,17 +190,12 @@ def insert_summary_into_db(ministry: str, data: dict):
         "InsideOut":    "insideout_attendance",
     }
     table_name = table_map[ministry]
-
-    # only the columns our table defines:
-    columns = ["date"] + MINISTRY_COLUMNS[ministry]
-    # build values in the same order
-    values  = [data[col] for col in columns]
+    columns    = ["date"] + MINISTRY_COLUMNS[ministry]
+    values     = [data[col] for col in columns]
 
     cols_sql     = ", ".join(columns)
     placeholders = ", ".join("%s" for _ in columns)
-    # update only non-date columns
-    update_sql = ", ".join(f"{col} = EXCLUDED.{col}" 
-                           for col in columns if col != "date")
+    update_sql   = ", ".join(f"{col}=EXCLUDED.{col}" for col in columns if col != "date")
 
     conn = psycopg2.connect(
         dbname=settings.DB_NAME,
@@ -211,8 +208,7 @@ def insert_summary_into_db(ministry: str, data: dict):
     cur.execute(f"""
         INSERT INTO {table_name} ({cols_sql})
         VALUES ({placeholders})
-        ON CONFLICT (date) DO UPDATE SET
-          {update_sql}
+        ON CONFLICT (date) DO UPDATE SET {update_sql}
     """, values)
     conn.commit()
     cur.close()
@@ -220,38 +216,38 @@ def insert_summary_into_db(ministry: str, data: dict):
 
 
 def fetch_and_process_checkins():
-    date = get_last_sunday()
+    date      = get_last_sunday()
     checkins, included = fetch_all_checkins(date)
-    people = parse_people_data(included)
-    raw_summaries = summarize_checkins_by_ministry(checkins, people)
+    people    = parse_people_data(included)
+    raw_sum   = summarize_checkins_by_ministry(checkins, people)
 
-    # DEBUG: capture counts
+    # debug output
     debug = {
-      "checkins_count": len(checkins),
-      "included_count": len(included),
-      "summaries": {m: dict(data) for m, data in raw_summaries.items()},
+        "checkins_count":  len(checkins),
+        "included_count":  len(included),
+        "summaries":       {m: dict(d) for m, d in raw_sum.items()},
     }
 
-    # before you mutate or upsert, capture a plain-dict snapshot
-    summaries = {m: dict(data) for m, data in raw_summaries.items()}
-
-    for m, data in summaries.items():
+    # upsert only non-zero weeks
+    for m, data in raw_sum.items():
         data["date"] = date
-        data["total_attendance"] = data.get("attendance_930",0) + data.get("attendance_1100",0)
-        if m=="InsideOut":
-            data["new_students"] = data.get("new_kids_1630",0)
+        if m == "InsideOut":
+            data["total_attendance"] = data.get("attendance_1630", 0)
+            data["new_students"]      = data.get("new_kids_1630", 0)
         else:
-            data["total_new_kids"] = data.get("new_kids_930",0) + data.get("new_kids_1100",0)
+            data["total_attendance"]  = data.get("attendance_930", 0) + data.get("attendance_1100", 0)
+            data["total_new_kids"]    = data.get("new_kids_930", 0)   + data.get("new_kids_1100", 0)
+
+        if data["total_attendance"] == 0:
+            continue
+
         data["notes"] = None
-        for key in MINISTRY_COLUMNS[m]:
-            data.setdefault(key, 0 if key!="notes" else None)
+        for c in MINISTRY_COLUMNS[m]:
+            data.setdefault(c, 0 if c != "notes" else None)
         insert_summary_into_db(m, data)
-    return {
-        "status": "success",
-        "date": str(date),
-        "summaries": summaries,
-        **debug
-    }
+
+    return {"status": "success", "date": str(date), **debug}
+
 
 @router.get("")
 def run_checkin_summary():
