@@ -223,7 +223,11 @@ def fetch_and_process_checkins():
     date = get_last_sunday()
     checkins, included = fetch_all_checkins(date)
     people = parse_people_data(included)
-    summaries = summarize_checkins_by_ministry(checkins, people)
+    raw_summaries = summarize_checkins_by_ministry(checkins, people)
+
+    # before you mutate or upsert, capture a plain-dict snapshot
+    summaries = {m: dict(data) for m, data in raw_summaries.items()}
+
     for m, data in summaries.items():
         data["date"] = date
         data["total_attendance"] = data.get("attendance_930",0) + data.get("attendance_1100",0)
@@ -235,7 +239,11 @@ def fetch_and_process_checkins():
         for key in MINISTRY_COLUMNS[m]:
             data.setdefault(key, 0 if key!="notes" else None)
         insert_summary_into_db(m, data)
-    return {"status":"success","date":str(date)}
+    return {
+        "status": "success",
+        "date": str(date),
+        "summaries": summaries
+    }
 
 @router.get("")
 def run_checkin_summary():
