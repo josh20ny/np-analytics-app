@@ -225,6 +225,13 @@ def fetch_and_process_checkins():
     people = parse_people_data(included)
     raw_summaries = summarize_checkins_by_ministry(checkins, people)
 
+    # DEBUG: capture counts
+    debug = {
+      "checkins_count": len(checkins),
+      "included_count": len(included),
+      "summaries": {m: dict(data) for m, data in raw_summaries.items()},
+    }
+
     # before you mutate or upsert, capture a plain-dict snapshot
     summaries = {m: dict(data) for m, data in raw_summaries.items()}
 
@@ -242,7 +249,8 @@ def fetch_and_process_checkins():
     return {
         "status": "success",
         "date": str(date),
-        "summaries": summaries
+        "summaries": summaries,
+        **debug
     }
 
 @router.get("")
