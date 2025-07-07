@@ -1,6 +1,7 @@
 # app/config.py
 import os
 from dotenv import load_dotenv
+from pydantic import BaseSettings
 
 # load .env from project root
 load_dotenv()
@@ -36,6 +37,19 @@ class Settings:
     CHANNEL_ID      = os.getenv("CHANNEL_ID", "")
 
 # single settings instance you can import everywhere
+
+class Settings(BaseSettings):
+    # path to your JSON file; default for local dev
+    SERVICE_ACCOUNT_FILE: str = os.getenv(
+        "GOOGLE_SERVICE_ACCOUNT_FILE", "google_service_account.json"
+    )
+    SPREADSHEET_ID: str
+    SHEET_NAME: str
+
+    class Config:
+        env_file = ".env"
+
+
 settings = Settings()
 
 
