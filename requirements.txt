@@ -48,7 +48,6 @@ pyasn1==0.6.1
 pyasn1_modules==0.4.2
 pycparser==2.21
 pydantic==2.11.7
-pydantic-settings==2.10.1
 pydantic_core==2.33.2
 pydeck==0.9.1
 pyparsing==3.2.3
@@ -82,3 +81,4 @@ uvicorn==0.35.0
 uvloop==0.21.0
 watchfiles==1.1.0
 websockets==15.0.1
+pydantic-settings>=2.11
