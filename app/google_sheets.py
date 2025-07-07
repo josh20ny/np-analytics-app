@@ -13,8 +13,11 @@ router = APIRouter(prefix="/google-sheets", tags=["Google Sheets"])
 
 
 def get_service(scopes):
-    info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    # this will read the file whose path is in the env var
+    creds = service_account.Credentials.from_service_account_file(
+        settings.GOOGLE_SERVICE_ACCOUNT_FILE,
+        scopes=scopes
+    )
     return build("sheets", "v4", credentials=creds)
 
 @router.get("/test-read")

@@ -13,3 +13,7 @@ db_data/
 
 # Zip file to upload to ChatGPT
 *.zip
+
+# Google Service Account
+google_service_account.json
+Google_client_secret.json
