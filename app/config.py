@@ -8,9 +8,14 @@ load_dotenv()
 
 class Settings:
     # Google Sheets
-    GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "")
-    SPREADSHEET_ID              = os.getenv("GOOGLE_SPREADSHEET_ID", "")
-    SHEET_NAME                  = os.getenv("GOOGLE_SHEET_NAME", "")
+    # path to your JSON file; default for local dev
+    SERVICE_ACCOUNT_FILE: str = os.getenv(
+        "GOOGLE_SERVICE_ACCOUNT_FILE", "google_service_account.json"
+    )
+    SPREADSHEET_ID: str
+    SHEET_NAME: str
+    class Config:
+        env_file = ".env"
 
     # Database
     DB_NAME   = os.getenv("DB_NAME", "")
@@ -37,17 +42,6 @@ class Settings:
     CHANNEL_ID      = os.getenv("CHANNEL_ID", "")
 
 # single settings instance you can import everywhere
-
-class Settings(BaseSettings):
-    # path to your JSON file; default for local dev
-    SERVICE_ACCOUNT_FILE: str = os.getenv(
-        "GOOGLE_SERVICE_ACCOUNT_FILE", "google_service_account.json"
-    )
-    SPREADSHEET_ID: str
-    SHEET_NAME: str
-
-    class Config:
-        env_file = ".env"
 
 
 settings = Settings()
