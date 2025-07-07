@@ -5,15 +5,16 @@ from google.oauth2.service_account import Credentials
 from .config import settings
 from .db import get_conn
 from datetime import datetime, timedelta
+import os, json
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
 router = APIRouter(prefix="/google-sheets", tags=["Google Sheets"])
 
 
 def get_service(scopes):
-    creds = Credentials.from_service_account_file(
-        settings.GOOGLE_SERVICE_ACCOUNT_FILE,
-        scopes=scopes
-    )
+    info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
     return build("sheets", "v4", credentials=creds)
 
 @router.get("/test-read")
