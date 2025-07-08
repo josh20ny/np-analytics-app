@@ -8,9 +8,21 @@ from .db import get_conn
 
 router = APIRouter(prefix="/google-sheets", tags=["Google Sheets"])
 
+# debug
+@router.get("/debug/secrets")
+def debug_list_secrets():
+    try:
+        files = os.listdir("/run/secrets")
+        return {"mounted_secrets": files}
+    except FileNotFoundError:
+        return {"error": "/run/secrets does not exist"}
+
+
+
 def get_service(scopes: list[str]):
     """
-    Initialize Google Sheets API client using the service account file.
+    Initialize Google Sheets API client using the service account file path
+    configured via Render Secret Files (mounted at /run/secrets/...).
     """
     creds = Credentials.from_service_account_file(
         settings.GOOGLE_SERVICE_ACCOUNT_FILE,
@@ -55,9 +67,8 @@ def process_adult_attendance_from_sheet():
     conn = get_conn()
     cur = conn.cursor()
 
-    # Enumerate starting at row 2 to align F-s column
+    # Enumerate starting at row 2 to align the F‑column checkmarks
     for idx, row in enumerate(rows, start=2):
-        # Skip if incomplete or already processed
         if len(row) < 5 or (len(row) >= 6 and row[5].strip() == "✅"):
             continue
         try:
@@ -100,7 +111,7 @@ def process_adult_attendance_from_sheet():
     cur.close()
     conn.close()
 
-    # Mark processed rows with a checkmark
+    # Batch‑update the sheet with ✅ marks
     if updates:
         sheet_api.values().batchUpdate(
             spreadsheetId=settings.GOOGLE_SPREADSHEET_ID,
@@ -111,5 +122,5 @@ def process_adult_attendance_from_sheet():
 
 @router.get("/process")
 def trigger_process():
-    """Trigger the attendance-processing routine."""
+    """Trigger the attendance‑processing routine."""
     return process_adult_attendance_from_sheet()
