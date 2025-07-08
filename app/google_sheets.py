@@ -13,8 +13,11 @@ def get_service(scopes: list[str]):
     """
     Chooses from SERVICE_ACCOUNT_FILE (local or Render Secret File).
     """
+    # for local runs
+    # creds = service_account.Credentials.from_service_account_file(
+    #     settings.GOOGLE_SERVICE_ACCOUNT_FILE,
     creds = service_account.Credentials.from_service_account_file(
-        settings.GOOGLE_SERVICE_ACCOUNT_FILE,
+        "/run/secrets/npanalyticsapp-03837a672494.json",
         scopes=scopes,
     )
     return build("sheets", "v4", credentials=creds)

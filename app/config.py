@@ -9,7 +9,7 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
 class Settings(BaseSettings):
     # ─── Google Sheets ──────────────────────────────────────────────────────────
-    GOOGLE_SERVICE_ACCOUNT_FILE: str
+    GOOGLE_SERVICE_ACCOUNT_FILE: str = "/run/secrets/google_service_account.json"
     GOOGLE_SPREADSHEET_ID: str
     GOOGLE_SHEET_NAME: str
 
