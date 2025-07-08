@@ -2,14 +2,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
 
-# 1) load .env into os.environ (optional if you rely solely on BaseSettings.env_file)
-# 2) BaseSettings will also look at env_file
+# Load local .env for development
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
-
 
 class Settings(BaseSettings):
     # ─── Google Sheets ──────────────────────────────────────────────────────────
-    GOOGLE_SERVICE_ACCOUNT_FILE: str = "/run/secrets/google_service_account.json"
+    # In Render, the service account JSON will be mounted here
+    GOOGLE_SERVICE_ACCOUNT_FILE: str = "/run/secrets/npanalyticsapp-03837a672494.json"
     GOOGLE_SPREADSHEET_ID: str
     GOOGLE_SHEET_NAME: str
 
@@ -39,12 +38,12 @@ class Settings(BaseSettings):
     CHANNEL_ID: str
 
     # ─── Optional Extras ────────────────────────────────────────────────────────
-    API_BASE_URL: str
+    API_BASE_URL: str = ""
 
     class Config:
         env_file = ".env"
         case_sensitive = True
-
+        extra = "ignore"
 
 # single settings instance for the whole app
 settings = Settings()
