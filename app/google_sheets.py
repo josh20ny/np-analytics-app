@@ -12,17 +12,17 @@ router = APIRouter(prefix="/google-sheets", tags=["Google Sheets"])
 @router.get("/debug/secrets")
 def debug_list_secrets():
     try:
-        files = os.listdir("/run/secrets")
+        files = os.listdir("/etc/secrets")
         return {"mounted_secrets": files}
     except FileNotFoundError:
-        return {"error": "/run/secrets does not exist"}
+        return {"error": "/etc/secrets does not exist"}
 
 
 
 def get_service(scopes: list[str]):
     """
     Initialize Google Sheets API client using the service account file path
-    configured via Render Secret Files (mounted at /run/secrets/...).
+    configured via Render Secret Files (mounted at /etc/secrets/...).
     """
     creds = Credentials.from_service_account_file(
         settings.GOOGLE_SERVICE_ACCOUNT_FILE,
