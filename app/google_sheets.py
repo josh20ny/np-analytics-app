@@ -8,15 +8,6 @@ from .db import get_conn
 
 router = APIRouter(prefix="/google-sheets", tags=["Google Sheets"])
 
-# debug
-@router.get("/debug/secrets")
-def debug_list_secrets():
-    try:
-        files = os.listdir("/etc/secrets")
-        return {"mounted_secrets": files}
-    except FileNotFoundError:
-        return {"error": "/etc/secrets does not exist"}
-
 
 
 def get_service(scopes: list[str]):
@@ -30,21 +21,22 @@ def get_service(scopes: list[str]):
     )
     return build("sheets", "v4", credentials=creds)
 
-@router.get("/test-read")
-def test_read():
-    """
-    Reads A1:D5 to verify credentials and sheet access.
-    """
-    try:
-        service = get_service(["https://www.googleapis.com/auth/spreadsheets.readonly"])
-        sheet_api = service.spreadsheets()
-        result = sheet_api.values().get(
-            spreadsheetId=settings.GOOGLE_SPREADSHEET_ID,
-            range=f"{settings.GOOGLE_SHEET_NAME}!A1:D5"
-        ).execute()
-        return {"data": result.get("values", [])}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# Only need this to test the credentials
+# @router.get("/test-read")
+# def test_read():
+#     """
+#     Reads A1:D5 to verify credentials and sheet access.
+#     """
+#     try:
+#         service = get_service(["https://www.googleapis.com/auth/spreadsheets.readonly"])
+#         sheet_api = service.spreadsheets()
+#         result = sheet_api.values().get(
+#             spreadsheetId=settings.GOOGLE_SPREADSHEET_ID,
+#             range=f"{settings.GOOGLE_SHEET_NAME}!A1:D5"
+#         ).execute()
+#         return {"data": result.get("values", [])}
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
 
 def get_previous_week_dates() -> tuple[str, str]:
     today = datetime.utcnow().date()
