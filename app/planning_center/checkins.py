@@ -83,7 +83,7 @@ def parse_people_data(included: list[dict]) -> dict[str, dict]:
         if item.get("type") != "Person":
             continue
 
-        pid = item.get("id")
+        pid   = item.get("id")
         attrs = item.get("attributes", {})
 
         # grade → int
@@ -104,7 +104,12 @@ def parse_people_data(included: list[dict]) -> dict[str, dict]:
             except Exception:
                 pass
 
-        gender = attrs.get("gender", "").lower() or "other"
+        raw_gender = attrs.get("gender")
+        if isinstance(raw_gender, str) and raw_gender.strip():
+            gender = raw_gender.lower()
+        else:
+            gender = "other"
+
         people[pid] = {"grade": grade, "age": age, "gender": gender}
 
     return people
@@ -287,4 +292,3 @@ def fetch_and_process_checkins():
 @router.get("")
 def run_checkin_summary():
     return fetch_and_process_checkins()
-
