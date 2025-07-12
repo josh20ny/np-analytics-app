@@ -3,25 +3,6 @@ from widgets import overlay_years_chart, weekly_yoy_table, pie_chart, kpi_card
 # Mapping of tabs to widget definitions
 # Each widget: loader=(table_name, date_col, value_col), widget=function, args=dict
 TAB_CONFIG = {
-    "YouTube": [
-        {"loader": ("livestreams", "published_at", "initial_views"),
-         "widget": overlay_years_chart,
-         "args": {"title": "Initial Livestream Views by Year"}},
-        {"loader": ("weekly_youtube_summary", "week_end", "total_views"),
-         "widget": overlay_years_chart,
-         "args": {"title": "Weekly Total Views by Year"}},
-        {"loader": ("livestreams", "published_at", "initial_views"),
-         "widget": weekly_yoy_table,
-         "args": {"title": "Livestream views YoY by Week"}},
-    ],
-    "Mailchimp": [
-        {"loader": ("mailchimp_weekly_summary", "week_end", "avg_open_rate"),
-         "widget": weekly_yoy_table,
-         "args": {"title": "Open Rate YoY by Week"}},
-        {"loader": ("mailchimp_weekly_summary", "week_end", "avg_click_rate"),
-         "widget": weekly_yoy_table,
-         "args": {"title": "Click Rate YoY by Week"}},
-    ],
     "Adult Attendance": [
         {"loader": ("adult_attendance", "date", "total_attendance"),
          "widget": overlay_years_chart,
@@ -104,6 +85,25 @@ TAB_CONFIG = {
          "widget": pie_chart,
          "args": {"title": "Grade Distribution"}},
     ],
+    "YouTube": [
+        {"loader": ("livestreams", "published_at", "initial_views"),
+         "widget": overlay_years_chart,
+         "args": {"title": "Initial Livestream Views by Year"}},
+        {"loader": ("weekly_youtube_summary", "week_end", "total_views"),
+         "widget": overlay_years_chart,
+         "args": {"title": "Weekly Total Views by Year"}},
+        {"loader": ("livestreams", "published_at", "initial_views"),
+         "widget": weekly_yoy_table,
+         "args": {"title": "Livestream views YoY by Week"}},
+    ],
+    "Mailchimp": [
+        {"loader": ("mailchimp_weekly_summary", "week_end", "avg_open_rate"),
+         "widget": weekly_yoy_table,
+         "args": {"title": "Open Rate YoY by Week"}},
+        {"loader": ("mailchimp_weekly_summary", "week_end", "avg_click_rate"),
+         "widget": weekly_yoy_table,
+         "args": {"title": "Click Rate YoY by Week"}},
+    ],    
     "Giving": [],
     "Engagement": [],
     "Front Door": [],
