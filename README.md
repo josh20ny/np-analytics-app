@@ -4,35 +4,61 @@ This document explains the structure of the NP Analytics App and what each file 
 
 ```
 project_root/
-│
-├─ app/
-│   ├─ __init__.py         # Marks 'app' as a Python package
-│   ├─ main.py             # Entry point: initializes FastAPI, mounts routers
-│   ├─ config.py           # Loads environment variables via python-dotenv
-│   ├─ db.py               # Database connection helper (psycopg2 wrapper)
-│   ├─ models.py           # Shared Pydantic models (e.g., AttendanceInput)
-│   ├─ google_sheets.py    # Google Sheets integration and /google-sheets endpoints
-│   ├─ attendance.py       # /attendance endpoints and sheet-processing logic
-│   ├─ mailchimp.py        # /mailchimp endpoint logic and database saving
-│   │
-│   ├─ planning_center/    # Planning Center Online integrations
-│   │   ├─ __init__.py     # Marks planning_center/ as a package
-│   │   ├─ checkins.py     # fetch/process check-ins, summarize by ministry, insert into DB
-│   │   └─ groups.py       # fetch/process groups summary, insert into DB
-│   │
-│   └─ youtube/            # YouTube Data & Analytics integrations
-│       ├─ __init__.py
-│       ├─ data_api.py     # YouTube Data API calls (search & video stats)
-│       ├─ analytics_api.py# YouTube Analytics API calls (weekly summary, watch time)
-│       └─ routes.py       # /youtube endpoints (livestream tracking & weekly-summary)
-│
-├─ scheduler.py            # APScheduler script: triggers endpoints every Monday at 8 AM CT
-├─ youtube_auth.py         # OAuth2 authentication wrapper for YouTube Analytics API
-├─ .env                    # Environment variables and secrets
-├─ requirements.txt        # Python dependencies
-└─ README.md               # This file
+├── $
+├── .DS_Store
+├── .gitignore
+├── README.md
+├── app
+    ├── __init__.py
+    ├── attendance.py
+    ├── config.py
+    ├── db.py
+    ├── google_sheets.py
+    ├── mailchimp.py
+    ├── models.py
+    ├── planning_center
+    │   ├── __init__.py
+    │   ├── checkins.py
+    │   └── groups.py
+    └── youtube
+    │   ├── __init__.py
+    │   ├── analytics_api.py
+    │   ├── data_api.py
+    │   └── routes.py
+├── dashboard
+    ├── config.py
+    ├── data.py
+    ├── main.py
+    └── widgets.py
+├── helper
+    ├── .DS_Store
+    ├── Historical Data-Jan 2021 to June 2025
+    │   ├── .DS_Store
+    │   ├── adult_attendance.csv
+    │   ├── groups_summary.csv
+    │   ├── insideout_attendance.csv
+    │   ├── livestreams.csv
+    │   ├── mailchimp_weekly_summary.csv
+    │   ├── transit_attendance.csv
+    │   ├── upstreet_attendance.csv
+    │   ├── waumbaland_attendance.csv
+    │   └── weekly_youtube_summary.csv
+    ├── cluster_tables.py
+    ├── dashboard.py
+    ├── npanalyticsapp.dump
+    ├── render-ca-bundle.pem
+    └── scheduler.py
+├── main.py
+├── requirements.txt
+├── run_jobs.py
+├── token.json
+└── youtube_auth.py
+
 
 ## Overview
+
+- **main.py**
+  Main controller for the npanalyticsapp. 
 
 - **app/**  
   Houses all FastAPI routers and utility modules, organized by concern:
@@ -45,9 +71,16 @@ project_root/
   - `planning_center/`: subpackage for PCO check-ins and groups summaries
   - `youtube/`: subpackage for YouTube Data vs Analytics API and related routes
 
-- **scheduler.py**  
-  Uses APScheduler to call key endpoints (`/attendance/process-sheet`,  
-  `/mailchimp/weekly-summary`, `/youtube/weekly-summary`) every Monday at 8 AM CT.
+  - **dashboard/**  
+  Houses all FastAPI routers and utility modules, organized by concern:
+  - `config.py`: Dashboard page and tabs setup configuration
+  - `data.py`: pulls in data from PostgreSQL
+  - `main.py`: launches the dashboard
+  - `widgets.py`: collection of different data-view functions
+
+- **run_jobs.py**  
+  Hits all of the API routes to actually pull the data and store it in the 
+  database. This is setup to run every monday morning at 8 am CST. 
 
 - **youtube_auth.py**  
   Contains the OAuth2 flow and credential setup for interacting with  
@@ -59,5 +92,4 @@ project_root/
 - **requirements.txt**  
   Lists all Python packages your project depends on.
 
-With this structure, each integration is isolated in its own module, making  
-testing, maintenance, and future expansions straightforward.  
+NP Analytics App is stored and run on render.com.  
