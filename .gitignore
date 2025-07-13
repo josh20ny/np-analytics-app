@@ -18,4 +18,8 @@ db_data/
 google_service_account.json
 Google_client_secret.json
 npanalyticsapp-03837a672494.json
+
 token.json
+
+# Text file of the whole porjeect to keep in Chat GPT
+np-analytics-app.txt
