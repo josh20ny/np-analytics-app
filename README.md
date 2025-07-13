@@ -25,6 +25,8 @@ project_root/
     │   ├── analytics_api.py
     │   ├── data_api.py
     │   └── routes.py
+├── channels.json
+├── clickup_test.py
 ├── dashboard
     ├── config.py
     ├── data.py
@@ -52,6 +54,13 @@ project_root/
 ├── requirements.txt
 ├── run_jobs.py
 ├── token.json
+├── weekly_summary
+    ├── __init__.py
+    ├── clickup_client.py
+    ├── config.py
+    ├── data_access.py
+    ├── formatter.py
+    └── main.py
 └── youtube_auth.py
 
 
@@ -72,11 +81,20 @@ project_root/
   - `youtube/`: subpackage for YouTube Data vs Analytics API and related routes
 
   - **dashboard/**  
-  Houses all FastAPI routers and utility modules, organized by concern:
+  Creates a visual dashboard of the data storred in PostgreSQL
   - `config.py`: Dashboard page and tabs setup configuration
   - `data.py`: pulls in data from PostgreSQL
   - `main.py`: launches the dashboard
   - `widgets.py`: collection of different data-view functions
+
+  - **weekly_summary/**  
+  Sends a weekly Summary of the data to ClickUP via API call
+  - `config.py`: configures env variables
+  - `data_access.py`: pulls in data from PostgreSQL
+  - `main.py`: launches the dashboard
+  - `formatter.py`: formats the data to a nice multiline text block to be sent in ClickUp Chat
+  - `clickup_client.py`: handles clickup interfacing
+
 
 - **run_jobs.py**  
   Hits all of the API routes to actually pull the data and store it in the 
