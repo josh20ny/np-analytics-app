@@ -5,6 +5,8 @@ from app.mailchimp import router as mailchimp_router
 from app.planning_center.checkins import router as pc_check_router
 from app.planning_center.groups import router as pc_groups_router
 from app.youtube.routes import router as yt_router
+from clickup_app.oauth_routes import router as oauth_router
+from clickup_app.webhooks    import router as webhooks_router
 
 app = FastAPI()
 
@@ -14,3 +16,5 @@ app.include_router(mailchimp_router)
 app.include_router(pc_check_router)
 app.include_router(pc_groups_router)
 app.include_router(yt_router)
+app.include_router(oauth_router)
+app.include_router(webhooks_router)
