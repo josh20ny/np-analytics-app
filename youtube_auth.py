@@ -11,7 +11,10 @@ SCOPES = ["https://www.googleapis.com/auth/yt-analytics.readonly"]
 def get_youtube_analytics_service():
     creds = None
     token_path = "token.json"
-    client_secret_file = "client_secret_2_429513113002-0h67df6t61ntchrb5ofokia7ur4a2pas.apps.googleusercontent.com"  # replace with your actual file if different
+    CLIENT_SECRET_FILE = os.environ.get(
+    "YOUTUBE_CLIENT_SECRET_PATH",
+    "client_secret_2_429513113002-0h67df6t61ntchrb5ofokia7ur4a2pas.apps.googleusercontent.com.json"   # fallback if you didn’t set it
+    )
  
      # Load existing credentials
     if os.path.exists(token_path):
@@ -22,7 +25,7 @@ def get_youtube_analytics_service():
         if creds and creds.expired and creds.refresh_token:
              creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(client_secret_file, SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
             creds = flow.run_local_server(port=8080)
          
         # Save the credentials
