@@ -3,7 +3,6 @@
 This document explains the structure of the NP Analytics App and what each file and folder does.
 
 ```
-project_root/
 ├── $
 ├── .DS_Store
 ├── .gitignore
@@ -43,7 +42,6 @@ project_root/
 ├── main.py
 ├── requirements.txt
 ├── run_jobs.py
-├── token.json
 ├── weekly_summary
     ├── __init__.py
     ├── config.py
