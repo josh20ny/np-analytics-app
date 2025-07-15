@@ -12,8 +12,8 @@ def get_youtube_analytics_service():
     creds = None
     token_path = "token.json"
     CLIENT_SECRET_FILE = os.environ.get(
-    "YOUTUBE_CLIENT_SECRET_PATH",
-    "client_secret_2_429513113002-0h67df6t61ntchrb5ofokia7ur4a2pas.apps.googleusercontent.com.json"   # fallback if you didn’t set it
+        "YOUTUBE_CLIENT_SECRET_PATH",
+        "client_secret_2_429513113002-0h67df6t61ntchrb5ofokia7ur4a2pas.apps.googleusercontent.com.json"   # fallback if you didn’t set it
     )
  
      # Load existing credentials
