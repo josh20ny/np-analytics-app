@@ -2,13 +2,13 @@ from fastapi import APIRouter, HTTPException
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
+from dateutil.parser import parse
 import os
+
 from .config import settings
 from .db import get_conn
 
 router = APIRouter(prefix="/google-sheets", tags=["Google Sheets"])
-
-
 
 def get_service(scopes: list[str]):
     """
@@ -20,23 +20,6 @@ def get_service(scopes: list[str]):
         scopes=scopes
     )
     return build("sheets", "v4", credentials=creds)
-
-# Only need this to test the credentials
-# @router.get("/test-read")
-# def test_read():
-#     """
-#     Reads A1:D5 to verify credentials and sheet access.
-#     """
-#     try:
-#         service = get_service(["https://www.googleapis.com/auth/spreadsheets.readonly"])
-#         sheet_api = service.spreadsheets()
-#         result = sheet_api.values().get(
-#             spreadsheetId=settings.GOOGLE_SPREADSHEET_ID,
-#             range=f"{settings.GOOGLE_SHEET_NAME}!A1:D5"
-#         ).execute()
-#         return {"data": result.get("values", [])}
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
 
 def get_previous_week_dates() -> tuple[str, str]:
     today = datetime.utcnow().date()
@@ -59,51 +42,59 @@ def process_adult_attendance_from_sheet():
     conn = get_conn()
     cur = conn.cursor()
 
-    # Enumerate starting at row 2 to align the F‑column checkmarks
+    # Enumerate starting at row 2 to align the F-column checkmarks
     for idx, row in enumerate(rows, start=2):
+        # skip if fewer than 5 columns or already processed
         if len(row) < 5 or (len(row) >= 6 and row[5].strip() == "✅"):
             continue
+
+        raw_date = row[1]
+        # Parse date in various formats
         try:
-            date_val = datetime.strptime(row[1], "%Y-%m-%d").date()
+            dt = parse(raw_date, dayfirst=False).date()
+        except (ValueError, TypeError):
+            if isinstance(raw_date, (int, float)):
+                # Excel’s “day zero” is 1899-12-30
+                dt = datetime(1899, 12, 30) + timedelta(days=int(raw_date))
+            else:
+                continue
+
+        try:
             chair_count = int(row[2])
             a930 = int(row[3])
             a1100 = int(row[4])
-            total = a930 + a1100
-
-            pc_930 = round((a930 / chair_count) * 100, 2) if chair_count else 0
-            pc_1100 = round((a1100 / chair_count) * 100, 2) if chair_count else 0
-            pd_930 = round((a930 / total) * 100, 2) if total else 0
-            pd_1100 = round((a1100 / total) * 100, 2) if total else 0
-
-            cur.execute(
-                """
-                INSERT INTO adult_attendance (
-                    date, chair_count, attendance_930, attendance_1100,
-                    percent_capacity_930, percent_capacity_1100,
-                    percent_distribution_930, percent_distribution_1100,
-                    total_attendance
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (date) DO NOTHING;
-                """,
-                (
-                    date_val, chair_count, a930, a1100,
-                    pc_930, pc_1100, pd_930, pd_1100, total
-                )
-            )
-
-            updates.append({
-                "range": f"{settings.GOOGLE_SHEET_NAME}!F{idx}",
-                "values": [["✅"]]
-            })
-
-        except Exception:
+        except (ValueError, IndexError):
             continue
+
+        total = a930 + a1100
+        pc_930 = round((a930 / chair_count) * 100, 2) if chair_count else 0
+        pc_1100 = round((a1100 / chair_count) * 100, 2) if chair_count else 0
+        pd_930 = round((a930 / total) * 100, 2) if total else 0
+        pd_1100 = round((a1100 / total) * 100, 2) if total else 0
+
+        cur.execute(
+            """
+            INSERT INTO adult_attendance (
+                date, chair_count, attendance_930, attendance_1100,
+                percent_capacity_930, percent_capacity_1100,
+                percent_distribution_930, percent_distribution_1100,
+                total_attendance
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (date) DO NOTHING;
+            """,
+            (dt, chair_count, a930, a1100, pc_930, pc_1100, pd_930, pd_1100, total)
+        )
+
+        updates.append({
+            "range": f"{settings.GOOGLE_SHEET_NAME}!F{idx}",
+            "values": [["✅"]]
+        })
 
     conn.commit()
     cur.close()
     conn.close()
 
-    # Batch‑update the sheet with ✅ marks
+    # Batch-update the sheet with ✅ marks
     if updates:
         sheet_api.values().batchUpdate(
             spreadsheetId=settings.GOOGLE_SPREADSHEET_ID,
@@ -114,5 +105,6 @@ def process_adult_attendance_from_sheet():
 
 @router.get("/process")
 def trigger_process():
-    """Trigger the attendance‑processing routine."""
+    """Trigger the attendance-processing routine."""
     return process_adult_attendance_from_sheet()
+
