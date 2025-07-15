@@ -9,6 +9,7 @@ project_root/
 ├── .gitignore
 ├── README.md
 ├── app
+    ├── .DS_Store
     ├── __init__.py
     ├── attendance.py
     ├── config.py
@@ -25,38 +26,26 @@ project_root/
     │   ├── analytics_api.py
     │   ├── data_api.py
     │   └── routes.py
-├── channels.json
-├── clickup_test.py
+├── clickup_app
+    ├── __init__.py
+    ├── clickup_client.py
+    ├── config.py
+    ├── crud.py
+    ├── database.py
+    ├── models.py
+    ├── oauth_routes.py
+    └── webhooks.py
 ├── dashboard
     ├── config.py
     ├── data.py
     ├── main.py
     └── widgets.py
-├── helper
-    ├── .DS_Store
-    ├── Historical Data-Jan 2021 to June 2025
-    │   ├── .DS_Store
-    │   ├── adult_attendance.csv
-    │   ├── groups_summary.csv
-    │   ├── insideout_attendance.csv
-    │   ├── livestreams.csv
-    │   ├── mailchimp_weekly_summary.csv
-    │   ├── transit_attendance.csv
-    │   ├── upstreet_attendance.csv
-    │   ├── waumbaland_attendance.csv
-    │   └── weekly_youtube_summary.csv
-    ├── cluster_tables.py
-    ├── dashboard.py
-    ├── npanalyticsapp.dump
-    ├── render-ca-bundle.pem
-    └── scheduler.py
 ├── main.py
 ├── requirements.txt
 ├── run_jobs.py
 ├── token.json
 ├── weekly_summary
     ├── __init__.py
-    ├── clickup_client.py
     ├── config.py
     ├── data_access.py
     ├── formatter.py
@@ -93,9 +82,17 @@ project_root/
   - `data_access.py`: pulls in data from PostgreSQL
   - `main.py`: launches the dashboard
   - `formatter.py`: formats the data to a nice multiline text block to be sent in ClickUp Chat
+
+  - **clickup_app/**  
+  Sets up the clickup interface
   - `clickup_client.py`: handles clickup interfacing
-
-
+  - `config.py`: configures env variables
+  - `crud.py`: handles retreiving / updating the access token
+  - `database.py`: pulls in data from PostgreSQL
+  - `models.py`: token scaffolding
+  - `oauth_routes.py`: handles oauth calls
+  - `webhooks.py`: handles sending and receiving
+  
 - **run_jobs.py**  
   Hits all of the API routes to actually pull the data and store it in the 
   database. This is setup to run every monday morning at 8 am CST. 
