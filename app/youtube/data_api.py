@@ -52,7 +52,7 @@ def insert_or_update_livestream(conn, video, today):
 
     initial_views = views if 0 <= days_ago <= 6 else None
     views_1w = views if 7 <= days_ago <= 13 else None
-    views_4w = views if 21 <= days_ago <= 27 else None
+    views_4w = views if 28 <= days_ago <= 34 else None
     avg_watch = None
     if initial_views is not None:
         avg_watch = get_average_watch_time(video_id)
@@ -76,8 +76,14 @@ def insert_or_update_livestream(conn, video, today):
             title=EXCLUDED.title,
             published_at=EXCLUDED.published_at,
             initial_views=COALESCE(livestreams.initial_views,EXCLUDED.initial_views),
-            views_1_week_later=COALESCE(livestreams.views_1_week_later,EXCLUDED.views_1_week_later),
-            views_4_weeks_later=COALESCE(livestreams.views_4_weeks_later,EXCLUDED.views_4_weeks_later),
+            views_1_week_later  = GREATEST(
+                COALESCE(livestreams.views_1_week_later,  0),
+                COALESCE(EXCLUDED.views_1_week_later,    0)
+            ),
+            views_4_weeks_later = GREATEST(
+                COALESCE(livestreams.views_4_weeks_later, 0),
+                COALESCE(EXCLUDED.views_4_weeks_later,   0)
+            ),
             avg_watch_duration=COALESCE(livestreams.avg_watch_duration,EXCLUDED.avg_watch_duration),
             last_checked=EXCLUDED.last_checked;
         """,
