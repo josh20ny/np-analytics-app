@@ -3,6 +3,9 @@ import requests
 from .config import settings
 from .db import get_conn
 from .google_sheets import get_previous_week_dates
+import json
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 router = APIRouter(prefix="/mailchimp", tags=["Mailchimp"])
 
@@ -21,6 +24,7 @@ def weekly_summary():
     results = []
 
     for name, list_id in AUDIENCES.items():
+        # Step 1: Fetch all campaigns for this audience last week
         url = f"https://{settings.MAILCHIMP_SERVER_PREFIX}.api.mailchimp.com/3.0/campaigns"
         params = {
             "since_send_time": start,
@@ -30,17 +34,38 @@ def weekly_summary():
         }
         resp = requests.get(url, auth=auth, params=params)
         if resp.status_code != 200:
+            print(f"⚠️ Failed to fetch campaigns for {name}: {resp.text}")
             continue
+
         camps = resp.json().get("campaigns", [])
-        total_open = sum(c.get("report_summary", {}).get("open_rate", 0.0) for c in camps)
-        total_click = sum(c.get("report_summary", {}).get("click_rate", 0.0) for c in camps)
-        count = len(camps)
+        total_proxy_open = 0.0
+        total_click = 0.0
+        count = 0
+
+        # Step 2: For each campaign, fetch the full report
+        for c in camps:
+            camp_id = c["id"]
+            rep_url = f"https://{settings.MAILCHIMP_SERVER_PREFIX}.api.mailchimp.com/3.0/reports/{camp_id}"
+            rep_resp = requests.get(rep_url, auth=auth)
+            if rep_resp.status_code != 200:
+                print(f"❌ Failed to fetch report for campaign {camp_id}")
+                continue
+
+            report = rep_resp.json()
+            proxy_open = report.get("opens", {}).get("proxy_excluded_open_rate")
+            click_rate = report.get("clicks", {}).get("click_rate", 0.0)
+
+            if proxy_open is not None:
+                total_proxy_open += proxy_open
+                total_click += click_rate or 0.0
+                count += 1
+
         if count:
             results.append({
                 "audience": name,
                 "num_emails": count,
-                "avg_open_rate": round(total_open / count * 100, 2),
-                "avg_click_rate": round(total_click / count * 100, 2)
+                "avg_open_rate": round(total_proxy_open / count * 100, 2),
+                "avg_click_rate": round(total_click / count * 100, 3)
             })
         else:
             results.append({
@@ -50,6 +75,7 @@ def weekly_summary():
                 "avg_click_rate": 0.0
             })
 
+    # Step 3: Store in DB
     conn = get_conn()
     cur = conn.cursor()
     for item in results:
