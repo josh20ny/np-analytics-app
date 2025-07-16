@@ -1,9 +1,9 @@
 import streamlit as st
 from data import load_table, engine
 from config import TAB_CONFIG
-from widgets import pie_chart, kpi_card
+from widgets import pie_chart, kpi_card, overlay_years_chart
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, time
 
 st.set_page_config(page_title="NP Analytics", layout="wide")
 st.title("📊 NP Analytics")
@@ -13,55 +13,105 @@ for tab_obj, tab_name in zip(tabs, TAB_CONFIG):
     with tab_obj:
         widgets = TAB_CONFIG[tab_name]
 
-        # ─── Full Data Table (last 10 rows) ───────────────────────────────────
-        if widgets:
-            first_loader = widgets[0]['loader']
-            table_all, date_col_all, _ = first_loader
-            try:
-                # Special handling for Mailchimp: split by audience
-                if tab_name == "Mailchimp":
-                    audiences = [
-                        "Northpoint Church",
-                        "InsideOut Parents",
-                        "Transit Parents",
-                        "Upstreet Parents",
-                        "Waumba Land Parents",
-                    ]
-                    for aud in audiences:
-                        df_aud = pd.read_sql(
-                            f"SELECT * FROM {table_all} WHERE audience_name = %s ORDER BY {date_col_all} DESC LIMIT 10",
-                            engine,
-                            params=(aud,),
-                            parse_dates=[date_col_all]
-                        )
-                        # Format date column
-                        if date_col_all in df_aud.columns:
-                            df_aud[date_col_all] = df_aud[date_col_all].dt.strftime('%B %d, %Y')
-                        st.subheader(f"Last 10 rows for {aud}")
-                        st.dataframe(df_aud, use_container_width=True)
-                else:
-                    df_all = pd.read_sql(
-                        f"SELECT * FROM {table_all}", engine,
-                        parse_dates=[date_col_all]
-                    )
-                    # limit to last 10 by date
-                    if date_col_all in df_all.columns:
-                        df_recent = df_all.sort_values(
-                            date_col_all, ascending=False
-                        ).head(10)
-                        df_recent[date_col_all] = df_recent[date_col_all].dt.strftime('%B %d, %Y')
-                    else:
-                        df_recent = df_all.tail(10)
-                    st.subheader(f"Last 10 rows from `{table_all}` table")
-                    st.dataframe(df_recent, use_container_width=True)
-            except Exception as e:
-                st.warning(f"Could not load data for `{table_all}`: {e}")
-
         if not widgets:
             st.write(f"**{tab_name}** tab coming soon!")
             continue
 
-        # ─── Widgets ──────────────────────────────────────────────────────────
+        # ─── Dynamic Raw Data Table with Date Range ─────────────────────────────
+        first_loader = widgets[0]['loader']
+        table_all, date_col_all, value_col_all = first_loader
+        try:
+            # Special handling for Mailchimp: split by audience
+            if tab_name == "Mailchimp":
+                audiences = [
+                    "Northpoint Church",
+                    "InsideOut Parents",
+                    "Transit Parents",
+                    "Upstreet Parents",
+                    "Waumba Land Parents",
+                ]
+                for aud in audiences:
+                    df_aud = pd.read_sql(
+                        f"SELECT * FROM {table_all} WHERE audience_name = %s",
+                        engine,
+                        params=(aud,),
+                        parse_dates=[date_col_all]
+                    )
+                    df_aud['parsed_date'] = pd.to_datetime(df_aud[date_col_all])
+                    df_aud = df_aud.sort_values('parsed_date', ascending=False)
+
+                    default_end = df_aud['parsed_date'].iloc[0]
+                    default_start = df_aud['parsed_date'].iloc[9] if len(df_aud) >= 10 else df_aud['parsed_date'].min()
+
+                    start_date, end_date = st.date_input(
+                        f"Select date range for {aud}",
+                        value=(default_start.date(), default_end.date()),
+                        min_value=df_aud['parsed_date'].min().date(),
+                        max_value=default_end.date(),
+                        key=f"aud_range_{aud}"
+                    )
+                    start_dt = datetime.combine(start_date, time.min)
+                    end_dt = datetime.combine(end_date, time.max)
+                    df_filtered = df_aud[
+                        (df_aud['parsed_date'] >= start_dt) &
+                        (df_aud['parsed_date'] <= end_dt)
+                    ].sort_values('parsed_date', ascending=False)
+
+                    if date_col_all in df_filtered.columns:
+                        df_filtered[date_col_all] = df_filtered[date_col_all].dt.strftime('%B %d, %Y')
+
+                    st.subheader(f"Filtered rows for {aud}")
+                    st.dataframe(df_filtered.drop(columns='parsed_date'), use_container_width=True)
+
+                    # Averages row
+                    numeric_cols = df_filtered.select_dtypes(include='number').columns
+                    if not df_filtered.empty and not numeric_cols.empty:
+                        avg_row = df_filtered[numeric_cols].mean(numeric_only=True).to_frame().T
+                        avg_row.index = ['Averages']
+                        st.dataframe(avg_row, use_container_width=True)
+
+            else:
+                df_all = pd.read_sql(
+                    f"SELECT * FROM {table_all}", engine,
+                    parse_dates=[date_col_all]
+                )
+                df_all['parsed_date'] = pd.to_datetime(df_all[date_col_all])
+                df_all = df_all.sort_values('parsed_date', ascending=False)
+
+                default_end = df_all['parsed_date'].iloc[0]
+                default_start = df_all['parsed_date'].iloc[9] if len(df_all) >= 10 else df_all['parsed_date'].min()
+
+                start_date, end_date = st.date_input(
+                    f"Select date range for {tab_name}",
+                    value=(default_start.date(), default_end.date()),
+                    min_value=df_all['parsed_date'].min().date(),
+                    max_value=default_end.date(),
+                    key=f"range_{tab_name}"
+                )
+                start_dt = datetime.combine(start_date, time.min)
+                end_dt = datetime.combine(end_date, time.max)
+                df_filtered = df_all[
+                    (df_all['parsed_date'] >= start_dt) &
+                    (df_all['parsed_date'] <= end_dt)
+                ].sort_values('parsed_date', ascending=False)
+
+                if date_col_all in df_filtered.columns:
+                    df_filtered[date_col_all] = df_filtered[date_col_all].dt.strftime('%B %d, %Y')
+
+                st.subheader(f"Filtered rows from `{table_all}` table")
+                st.dataframe(df_filtered.drop(columns='parsed_date'), use_container_width=True)
+
+                # Averages row
+                numeric_cols = df_filtered.select_dtypes(include='number').columns
+                if not df_filtered.empty and not numeric_cols.empty:
+                    avg_row = df_filtered[numeric_cols].mean(numeric_only=True).to_frame().T
+                    avg_row.index = ['Averages']
+                    st.dataframe(avg_row, use_container_width=True)
+
+        except Exception as e:
+            st.warning(f"Could not load data for `{table_all}`: {e}")
+
+        # ─── Widgets ─────────────────────────────────────────
         for meta in widgets:
             table, date_col, value_col = meta['loader']
             widget_fn = meta['widget']
@@ -117,6 +167,10 @@ for tab_obj, tab_name in zip(tabs, TAB_CONFIG):
                 kpi_card(args['label'], latest)
                 continue
 
-            # Default: overlay or YoY table
-            widget_fn(df, **args)
+            # Line chart
+            if widget_fn == overlay_years_chart:
+                widget_fn(df, **args)
+                continue
 
+            # Default
+            widget_fn(df, **args)

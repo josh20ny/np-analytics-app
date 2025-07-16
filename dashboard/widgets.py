@@ -101,3 +101,38 @@ def kpi_card(label: str, value, delta=None):
         st.metric(label, value, delta)
     else:
         st.metric(label, value)
+
+
+def date_range_table(df: pd.DataFrame, title: str):
+    """
+    Displays a table filtered by a selected date range.
+    Works with any table that has a formatted 'date' column.
+    """
+    st.subheader(title + " (Filtered Table)")
+
+    df['parsed_date'] = pd.to_datetime(df['date'], format='%B %d, %Y')
+    df = df.sort_values('parsed_date')
+
+    # Default to last 10 dates
+    default_end = df['parsed_date'].max()
+    default_start = df['parsed_date'].iloc[-10] if len(df) >= 10 else df['parsed_date'].min()
+
+    start_date, end_date = st.date_input(
+        "Select date range",
+        value=(default_start, default_end),
+        min_value=df['parsed_date'].min(),
+        max_value=default_end,
+        key=f"date_range_table_{title.replace(' ', '_')}"
+    )
+
+    start_dt = datetime.combine(start_date, datetime.min.time())
+    end_dt = datetime.combine(end_date, datetime.max.time())
+    filtered = df[(df['parsed_date'] >= start_dt) & (df['parsed_date'] <= end_dt)]
+
+    if filtered.empty:
+        st.warning("No data in selected range.")
+        return
+
+    display_df = filtered.drop(columns='parsed_date')
+    st.dataframe(display_df, use_container_width=True)
+
