@@ -20,6 +20,7 @@ This document explains the structure of the NP Analytics App and what each file 
     │   ├── __init__.py
     │   ├── checkins.py
     │   └── groups.py
+    │   └── backfill_checkins.py
     └── youtube
     │   ├── __init__.py
     │   ├── analytics_api.py
