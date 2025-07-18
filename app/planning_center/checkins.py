@@ -148,9 +148,11 @@ def determine_ministry(grade: int | None, age: int | None) -> str | None:
     Final fallback: if age is high school range and grade is missing, assume InsideOut.
     """
     if grade is not None:
-        if 0 <= grade <= 4:
+        if 0 <= grade <= 5:
             return "UpStreet"
-        if 5 <= grade <= 8:
+        if grade == 'kinder':
+            return "UpStreet"
+        if 6 <= grade <= 8:
             return "Transit"
         if 9 <= grade <= 12:
             return "InsideOut"
@@ -239,9 +241,13 @@ def summarize_checkins_by_ministry(
 
             grade = None
             if pinfo.get("grade") is not None:
+                raw_grade = pinfo["grade"]
                 try:
-                    grade = int(pinfo["grade"])
-                except ValueError:
+                    if raw_grade == "kinder":
+                        grade = 0
+                    else:
+                        grade = int(raw_grade)
+                except (ValueError, TypeError):
                     pass
             age = None
             bd = pinfo.get("birthdate")
@@ -310,7 +316,14 @@ def summarize_checkins_by_ministry(
                     summary[ministry]["breakdown"][demo_col] += 1
 
             elif ministry == "Waumba Land":
-                bracket = "0_2" if age is not None and age <= 2 else "3_5" if age is not None and age <= 5 else None
+                bracket = None
+                if grade == -1:  # Pre-K from grade
+                    bracket = "3_5"
+                elif age is not None:
+                    if age <= 2:
+                        bracket = "0_2"
+                    elif age <= 5:
+                        bracket = "3_5"
                 if bracket:
                     demo_col = f"age_{bracket}_{gender}"
                     summary[ministry]["breakdown"][demo_col] += 1
@@ -381,6 +394,7 @@ async def run_checkin_summary(date: str | None = None):
         date = get_last_sunday()
     
     checkins, included = fetch_all_checkins(date)
+    print(f"📦 Raw check-ins received from API: {len(checkins)}")
     people = parse_people_data(included)
     person_created = parse_person_created_dates(included)
     events = parse_event_data(included)
