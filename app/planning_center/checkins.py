@@ -2,9 +2,8 @@ import requests
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 from collections import defaultdict
-
+import io
 from fastapi import APIRouter, HTTPException
-
 from app.config import settings
 from app.db import get_conn
 
@@ -331,29 +330,52 @@ def summarize_checkins_by_ministry(
         except Exception:
             continue
 
-    print("\n🔍 Skip Reasons Summary:")
+    # print("\n🔍 Skip Reasons Summary:")
+    # for reason, count in skipped.items():
+    #     print(f" - {reason}: {count}")
+
+    # print("\n🧹 Possible Duplicate Profiles Detected:")
+    # for ministry, dups in possible_duplicates.items():
+    #     print(f" - {ministry}: {len(dups)} potential duplicates")
+
+    # print("\n📋 WRAP-UP SUMMARY")
+    # print("--------------------------")
+    # for ministry, data in summary.items():
+    #     total_count = sum(
+    #         count for key, count in data["breakdown"].items() if key.startswith("attendance_")
+    #     )
+    #     unique_ids = len(data["counted_ids"])
+    #     possible_dupes = len(possible_duplicates.get(ministry, set()))
+
+    #     print(f"📍 {ministry}")
+    #     print(f"   ✅ Total Counted: {total_count}")
+    #     print(f"   👤 Unique People IDs Counted: {unique_ids}")
+    #     print(f"   🧹 Possible Duplicates: {possible_dupes}\n")
+
+    output = io.StringIO()
+    output.write("\n🔍 Skip Reasons Summary:\n")
     for reason, count in skipped.items():
-        print(f" - {reason}: {count}")
+        output.write(f"- {reason}: {count}\n")
 
-    print("\n🧹 Possible Duplicate Profiles Detected:")
+    output.write("\n🧹 Possible Duplicate Profiles Detected:\n")
     for ministry, dups in possible_duplicates.items():
-        print(f" - {ministry}: {len(dups)} potential duplicates")
+        output.write(f"- {ministry}: {len(dups)} potential duplicates\n")
 
-    print("\n📋 WRAP-UP SUMMARY")
-    print("--------------------------")
+    output.write("\n📋 WRAP-UP SUMMARY\n--------------------------\n")
     for ministry, data in summary.items():
         total_count = sum(
             count for key, count in data["breakdown"].items() if key.startswith("attendance_")
         )
         unique_ids = len(data["counted_ids"])
         possible_dupes = len(possible_duplicates.get(ministry, set()))
-
-        print(f"📍 {ministry}")
-        print(f"   ✅ Total Counted: {total_count}")
-        print(f"   👤 Unique People IDs Counted: {unique_ids}")
-        print(f"   🧹 Possible Duplicates: {possible_dupes}\n")
-
-    return {k: v["breakdown"] for k, v in summary.items()}
+        output.write(f"📍 {ministry}\n")
+        output.write(f"   ✅ Total Counted: {total_count}\n")
+        output.write(f"   👤 Unique People IDs Counted: {unique_ids}\n")
+        output.write(f"   🧹 Possible Duplicates: {possible_dupes}\n\n")
+    return (
+        {k: v["breakdown"] for k, v in summary.items()},
+        output.getvalue().strip()
+    )
 
 
 
@@ -392,19 +414,16 @@ async def run_checkin_summary(date: str | None = None):
         date = datetime.fromisoformat(date).date()
     else:
         date = get_last_sunday()
-    
+
     checkins, included = fetch_all_checkins(date)
     print(f"📦 Raw check-ins received from API: {len(checkins)}")
+
     people = parse_people_data(included)
     person_created = parse_person_created_dates(included)
     events = parse_event_data(included)
-    raw_sum = summarize_checkins_by_ministry(checkins, people, person_created, events)
 
-    debug = {
-        "checkins_count": len(checkins),
-        "included_count": len(included),
-        "summaries": {m: dict(cnts) for m, cnts in raw_sum.items()},
-    }
+    # 🧠 Always generate this
+    raw_sum, debug_text = summarize_checkins_by_ministry(checkins, people, person_created, events)
 
     for m, data in raw_sum.items():
         data["date"] = date
@@ -414,12 +433,23 @@ async def run_checkin_summary(date: str | None = None):
         else:
             data["total_attendance"] = data.get("attendance_930", 0) + data.get("attendance_1100", 0)
             data["total_new_kids"] = data.get("new_kids_930", 0) + data.get("new_kids_1100", 0)
+
         if data.get("total_attendance", 0) == 0:
             continue
+
         data["notes"] = None
         for col in MINISTRY_COLUMNS[m]:
             data.setdefault(col, 0 if col != "notes" else None)
+
         insert_summary_into_db(m, data)
 
-    return {"status": "success", "date": str(date), **debug}
+    return {
+        "status": "success",
+        "date": str(date),
+        "checkins_count": len(checkins),
+        "included_count": len(included),
+        "summaries": {m: dict(cnts) for m, cnts in raw_sum.items()},
+        "debug_text": debug_text  # ✅ always included now
+    }
+
 

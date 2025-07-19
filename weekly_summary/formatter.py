@@ -41,7 +41,7 @@ def format_summary(latest: dict[str, dict[str, dict]]) -> str:
         def fmt(val, yoy):
             if yoy is None:
                 return f"{val:,}"
-            return f"{val:,} ({yoy:+.1f}%)"
+            return f"{val:,} ({yoy:+.1f}% YoY)"
 
         lines.append(
             f"*{display}*: "
@@ -64,7 +64,7 @@ def format_summary(latest: dict[str, dict[str, dict]]) -> str:
     if yoy_io is None:
         io_str = f"{tot_io:,}"
     else:
-        io_str = f"{tot_io:,} ({yoy_io:+.1f}%)"
+        io_str = f"{tot_io:,} ({yoy_io:+.1f}% YoY)"
 
     lines.append(f"*InsideOut Attendance*: Total = {io_str}")
 

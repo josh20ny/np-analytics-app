@@ -1,65 +1,81 @@
-# run_jobs.py
-
 import os
 import logging
 import requests
 import time
+import weekly_summary.main
 
-# ─── CONFIG ───────────────────────────────────────────────────────────────────
-# You can set API_BASE_URL in Render’s env-vars; otherwise it falls back here.
 BASE_URL = os.getenv(
     "API_BASE_URL",
     "https://np-analytics-app.onrender.com"
 )
 
-# ─── LOGGING ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-# ─── JOBS ─────────────────────────────────────────────────────────────────────
 JOBS = [
     ("/youtube/weekly-summary",  "YouTube weekly summary"),
     ("/youtube/livestreams",     "YouTube livestream tracking"),
     ("/attendance/process-sheet","Adult attendance processing"),
     ("/mailchimp/weekly-summary","Mailchimp weekly summary"),
+    ("/planning-center/groups",  "Planning Center Groups"),
     ("/planning-center/checkins","Planning Center check-ins"),
-    ("/planning-center/groups","Planning Center Groups"),
 ]
 
-# ─── RUNNER ───────────────────────────────────────────────────────────────────
-def call_api(endpoint: str, label: str):
+LOG_OUTPUT = []
+
+def call_api_and_capture(endpoint: str, label: str):
     url = BASE_URL.rstrip("/") + endpoint
     try:
         resp = requests.get(url, timeout=30)
+        status_line = f"{label}: {resp.status_code} - {resp.reason}"
         if resp.ok:
-            logging.info(f"✅ {label} succeeded ({resp.status_code})")
+            LOG_OUTPUT.append(f"✅ {status_line}")
+            if "checkins" in endpoint:
+                try:
+                    data = resp.json()
+                    print("🧾 Full checkins response JSON:")
+                    print(data)
+                    dbg = data.get("debug_text", "")
+                    print("📥 debug_text from response:", repr(dbg[:300]))
+                    return dbg
+                except Exception as e:
+                    print(f"❌ Error parsing JSON for checkins debug: {e}")
         else:
-            logging.warning(f"⚠️ {label} returned {resp.status_code}: {resp.text}")
-    except Exception:
-        logging.exception(f"❌ Exception during {label}")
+            LOG_OUTPUT.append(f"⚠️ {status_line}\n{resp.text}")
+    except Exception as e:
+        LOG_OUTPUT.append(f"❌ {label}: {str(e)}")
+    return ""
+
+def call_api(endpoint: str, label: str):
+    _ = call_api_and_capture(endpoint, label)
 
 def main():
-    WAKEUP_DELAY = 60  # seconds; tweak if you need more/less
-    # 1) Wake up ping
+    WAKEUP_DELAY = 10
+    debug_text = ""
+
     try:
-        resp = requests.get(BASE_URL.rstrip("/") + "/", timeout=10)
+        resp = requests.get(BASE_URL.rstrip("/") + "/docs", timeout=10)
         logging.info(f"🌐  Warm-up ping returned {resp.status_code}")
     except Exception:
-        # 2) Waiting 60 seconds to allow for render web service to wake up the app
         logging.info(f"⏱️  Waiting {WAKEUP_DELAY}s for app to spin up…")
         time.sleep(WAKEUP_DELAY)
 
-
-
-    # 3) Fire off each job, with a 60s buffer between them
     for idx, (endpoint, label) in enumerate(JOBS):
-        call_api(endpoint, label)
+        if "checkins" in endpoint:
+            debug_text = call_api_and_capture(endpoint, label)
+            print("🧪 Captured from API call:")
+            print(debug_text[:300])
+        else:
+            call_api(endpoint, label)
+
         if idx < len(JOBS) - 1:
-            logging.info("⏱️  Sleeping 60s before next job…")
-            time.sleep(60)
+            logging.info("⏱️  Sleeping 10s before next job…")
+            time.sleep(10)
+
+    weekly_summary.main.run(LOG_OUTPUT, debug_text)
 
 if __name__ == "__main__":
     main()
