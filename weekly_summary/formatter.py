@@ -44,7 +44,7 @@ def format_summary(latest: dict[str, dict[str, dict]]) -> str:
             return f"{val:,} ({yoy:+.1f}% YoY)"
 
         lines.append(
-            f"*{display}*: "
+            f"**{display}**: "
             f"9:30 = {fmt(a930,   None)}, "
             f"11:00 = {fmt(a1100, None)}, "
             f"Total = {fmt(tot,   yoytot)}"
@@ -66,7 +66,7 @@ def format_summary(latest: dict[str, dict[str, dict]]) -> str:
     else:
         io_str = f"{tot_io:,} ({yoy_io:+.1f}% YoY)"
 
-    lines.append(f"*InsideOut Attendance*: Total = {io_str}")
+    lines.append(f"**InsideOut Attendance**: Total = {io_str}")
 
     # ── 3) The rest of your tables (unchanged) ────────────────────────────────────
     skip = {
@@ -81,17 +81,17 @@ def format_summary(latest: dict[str, dict[str, dict]]) -> str:
             continue
         row = data["current"]
 
-        if label == "Livestreams":
+        if label == "**Livestreams**":
             ts       = row.get("published_at")
             ts_str   = ts.strftime("%b %d") if hasattr(ts, "strftime") else ts
             views    = row.get("initial_views", 0)
-            lines.append(f"*Livestreams*: views = {views:,}")
+            lines.append(f"Livestreams: views = {views:,}")
 
         elif label == "GroupsSummary":
             d        = row.get("date")
             d_str    = d.strftime("%b %d") if hasattr(d, "strftime") else str(d)
             groups   = row.get("number_of_groups", 0)
-            lines.append(f"*Groups Summary*: total groups = {groups:,}")
+            lines.append(f"**Groups Summary**: total groups = {groups:,}")
 
         else:
             # fallback: show all numeric fields
@@ -99,12 +99,12 @@ def format_summary(latest: dict[str, dict[str, dict]]) -> str:
             date_str = dt.strftime("%b %d") if hasattr(dt, "strftime") else str(dt)
             nums = {k:v for k,v in row.items() if isinstance(v,(int,float))}
             vals = ", ".join(f"{k}={v:,}" for k,v in nums.items())
-            lines.append(f"*{label}*: {vals}")
+            lines.append(f"**{label}**: {vals}")
 
 
     # ── 4) Wrap it all up ─────────────────────────────────────────────────────────
-    header = f"📊 *Snapshot for* Sunday, {date_str}"
+    header = f"# 📊 Snapshot for Sunday, {date_str}"
     body   = "\n".join(f"- {l}" for l in lines)
-    footer = "\n\n🔗 Full dashboard: https://np-analytics-dashboard.onrender.com"
+    footer = "\n\n## 🔗 Full dashboard: https://np-analytics-dashboard.onrender.com"
 
     return f"{header}\n{body}{footer}"

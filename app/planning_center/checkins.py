@@ -353,11 +353,12 @@ def summarize_checkins_by_ministry(
     #     print(f"   🧹 Possible Duplicates: {possible_dupes}\n")
 
     output = io.StringIO()
-    output.write("\n🔍 Skip Reasons Summary:\n")
+    output.write("\n🔍 Uncounted Planning Center Checkins:\n")
+    output.write(f"📦 Raw check-ins received from API: {len(checkins)}")
     for reason, count in skipped.items():
         output.write(f"- {reason}: {count}\n")
 
-    output.write("\n🧹 Possible Duplicate Profiles Detected:\n")
+    output.write("\n\n🧹 Possible Duplicate Profiles Detected:\n")
     for ministry, dups in possible_duplicates.items():
         output.write(f"- {ministry}: {len(dups)} potential duplicates\n")
 
@@ -376,8 +377,6 @@ def summarize_checkins_by_ministry(
         {k: v["breakdown"] for k, v in summary.items()},
         output.getvalue().strip()
     )
-
-
 
 
 def insert_summary_into_db(ministry: str, data: dict):
@@ -416,7 +415,6 @@ async def run_checkin_summary(date: str | None = None):
         date = get_last_sunday()
 
     checkins, included = fetch_all_checkins(date)
-    print(f"📦 Raw check-ins received from API: {len(checkins)}")
 
     people = parse_people_data(included)
     person_created = parse_person_created_dates(included)

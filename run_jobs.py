@@ -36,10 +36,7 @@ def call_api_and_capture(endpoint: str, label: str):
             if "checkins" in endpoint:
                 try:
                     data = resp.json()
-                    print("🧾 Full checkins response JSON:")
-                    print(data)
                     dbg = data.get("debug_text", "")
-                    print("📥 debug_text from response:", repr(dbg[:300]))
                     return dbg
                 except Exception as e:
                     print(f"❌ Error parsing JSON for checkins debug: {e}")
@@ -64,13 +61,13 @@ def main():
         time.sleep(WAKEUP_DELAY)
 
     for idx, (endpoint, label) in enumerate(JOBS):
+        print(f"📡 Calling route: {endpoint} – {label}")
         if "checkins" in endpoint:
             debug_text = call_api_and_capture(endpoint, label)
-            print("🧪 Captured from API call:")
-            print(debug_text[:300])
         else:
             call_api(endpoint, label)
 
+        print(f"✅ Finished: {label}: {resp.status_code}")
         if idx < len(JOBS) - 1:
             logging.info("⏱️  Sleeping 10s before next job…")
             time.sleep(10)

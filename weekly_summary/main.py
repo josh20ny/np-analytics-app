@@ -41,7 +41,6 @@ def run(log_output=None, debug_text=""):
         if resp.ok:
             data = resp.json()
             debug_text = data.get("debug_text", "")
-            print(f"🪵 Debug text pulled:\n{debug_text[:300]}")
         else:
             print(f"⚠️ Failed to fetch checkins debug summary: {resp.status_code}")
     except Exception as e:
@@ -49,8 +48,6 @@ def run(log_output=None, debug_text=""):
 
     # 5) Build full report and post to ClickUp
     full_report = build_full_report(summary, log_output or [], checkins_debug=debug_text)
-    print("📤 Final debug_text going into build_full_report:")
-    print(debug_text)
 
     try:
         post_message(db, workspace_id, channel_id, full_report)
