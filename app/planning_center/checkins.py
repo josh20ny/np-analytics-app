@@ -354,7 +354,7 @@ def summarize_checkins_by_ministry(
 
     output = io.StringIO()
     output.write("\n🔍 Uncounted Planning Center Checkins:\n")
-    output.write(f"📦 Raw check-ins received from API: {len(checkins)}")
+    output.write(f"\n\n📦 Raw check-ins received from API: {len(checkins)}\n\n")
     for reason, count in skipped.items():
         output.write(f"- {reason}: {count}\n")
 
