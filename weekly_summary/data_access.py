@@ -3,6 +3,7 @@ from sqlalchemy import create_engine
 from weekly_summary.config import DATABASE_URL
 from dateutil.relativedelta import relativedelta
 from datetime    import timedelta
+from sqlalchemy.sql import text
 
 # 1) same TABLES mapping as before
 TABLES = {
@@ -49,3 +50,14 @@ def fetch_all_with_yoy() -> dict[str, dict[str, dict]]:
 
         result[key] = {"current": row_cur, "prior": row_pri}
     return result
+
+def fetch_all_mailchimp_rows_for_latest_week() -> list[dict]:
+    with engine.connect() as conn:
+        df = pd.read_sql("""
+            SELECT * FROM mailchimp_weekly_summary
+            WHERE week_end = (
+                SELECT MAX(week_end) FROM mailchimp_weekly_summary
+            )
+            ORDER BY audience_name
+        """, conn)
+        return df.to_dict(orient="records")

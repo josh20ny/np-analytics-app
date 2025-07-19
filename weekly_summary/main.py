@@ -8,6 +8,7 @@ from weekly_summary.formatter import format_summary
 from weekly_summary.report_builder import build_full_report
 from clickup_app.clickup_client import post_message
 from clickup_app.crud import get_token
+from weekly_summary.data_access import fetch_all_with_yoy, fetch_all_mailchimp_rows_for_latest_week
 from app.config import settings
 import requests
 import os
@@ -32,7 +33,8 @@ def run(log_output=None, debug_text=""):
 
     # 3) Fetch YoY summary data
     latest_data = fetch_all_with_yoy()
-    summary = format_summary(latest_data)
+    mailchimp_rows = fetch_all_mailchimp_rows_for_latest_week()
+    summary = format_summary(latest_data, mailchimp_rows)
 
     # 4) Fetch debug summary from checkins route
     debug_text = ""
