@@ -11,32 +11,24 @@ import os
 router = APIRouter()
 
 @router.post("/webhooks/clickup/chat")
-async def receive_chat_webhook(request: Request, db: Session = Depends(get_db)):
+async def receive_clickup_automation(request: Request, db: Session = Depends(get_db)):
     payload = await request.json()
-    event_type = payload.get("event")
+    print(f"📦 Received automation payload: {payload}")
 
-    if event_type != "messageCreated":
-        return {"status": "ignored", "reason": f"Unhandled event type: {event_type}"}
+    # Attempt to parse what we need
+    content = payload.get("content", "") or payload.get("text", "")
+    channel_id = payload.get("chat_id") or payload.get("channel_id")
+    username = payload.get("username") or "someone"
+    workspace_id = os.getenv("CLICKUP_TEAM_ID")
 
-    data = payload.get("data", {})
-    content = data.get("content", "")
-    channel_id = data.get("channel_id")
-    user_info = data.get("user", {})
-    username = user_info.get("username", "")
-    workspace_id = payload.get("team_id")
+    if not content or not channel_id:
+        return {"status": "ignored", "reason": "missing content or channel_id"}
 
-    if not content or not channel_id or not workspace_id:
-        return {"status": "ignored", "reason": "missing fields"}
-
-    print(f"📦 Incoming ClickUp Payload: {content}")
-
-    # Only respond if bot is tagged
     if "@NP Analytics Bot" not in content:
-        return {"status": "ignored", "reason": "not mentioned"}
+        return {"status": "ignored", "reason": "bot not mentioned"}
 
-    # Strip bot mention for cleaner prompt
     prompt = content.replace("@NP Analytics Bot", "").strip()
-    print(f"⏳ Sending to OpenAI Assistant: {prompt}")
+    print(f"🤖 Prompting assistant: {prompt}")
 
     try:
         reply = get_reply_from_assistant(prompt)
@@ -44,8 +36,9 @@ async def receive_chat_webhook(request: Request, db: Session = Depends(get_db)):
         post_message(db, workspace_id, channel_id, formatted_reply)
         return {"status": "replied", "message": formatted_reply}
     except Exception as e:
-        print(f"❌ Error during assistant reply: {e}")
+        print(f"❌ Assistant error: {e}")
         return {"status": "error", "message": str(e)}
+
 
 
 @router.post("/clickup/register-webhook")
