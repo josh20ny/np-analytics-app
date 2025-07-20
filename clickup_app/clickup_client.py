@@ -6,6 +6,7 @@ from clickup_app.config import CLIENT_ID, CLIENT_SECRET
 from clickup_app.crud import get_token, create_or_update_token
 from app.db import get_db
 from sqlalchemy.orm import Session
+from clickup_app.models import ClickUpToken
 
 TOKEN_URL = "https://api.clickup.com/api/v2/oauth/token"
 API_BASE  = "https://api.clickup.com/api/v3"
@@ -50,3 +51,7 @@ def post_message(db: Session, workspace_id: str, channel_id: str, content: str, 
     resp = requests.post(url, json=payload, headers=headers)
     resp.raise_for_status()
     return resp.json()
+
+def get_token_by_workspace(db, workspace_id: str):
+    return db.query(ClickUpToken).filter_by(workspace_id=workspace_id).first()
+
