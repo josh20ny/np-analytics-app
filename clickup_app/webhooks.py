@@ -20,7 +20,7 @@ async def receive_clickup_automation(
     content = data.get("text_content", "")
     channel_id = data.get("parent")
     user_id = data.get("userid")
-    workspace_id = os.getenv("CLICKUP_TEAM_ID")
+    workspace_id = os.getenv("CLICKUP_WORKSPACE_ID")
 
     print(f"🔗 Received message from workspace {workspace_id} in channel {channel_id}")
 
