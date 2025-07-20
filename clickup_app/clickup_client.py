@@ -3,7 +3,7 @@
 import requests
 from sqlalchemy.orm import Session
 from datetime import datetime
-
+import os
 from clickup_app.config import CLIENT_ID, CLIENT_SECRET
 from clickup_app.crud import get_token, create_or_update_token
 from clickup_app.models import ClickUpToken
@@ -54,22 +54,16 @@ def get_access_token(db: Session, workspace_id: str) -> str:
     return token.access_token
 
 
-def post_message(db: Session, workspace_id: str, channel_id: str, message: str):
-    token = get_token_by_workspace(db, workspace_id)
+def post_message(db, workspace_id: str, channel_id: str, message: str):
+    token = os.getenv("CLICKUP_BOT_ACCESS_TOKEN")
     if not token:
-        print(f"❌ No token found in DB for workspace_id: {workspace_id}")
-        raise Exception("No ClickUp token found")
-
-    token = (
-        refresh_access_token(db, token)
-        if token.expires_at <= datetime.utcnow()
-        else token
-    )
+        raise Exception("Missing CLICKUP_BOT_ACCESS_TOKEN")
 
     headers = {
-        "Authorization": token.access_token,
+        "Authorization": token,
         "Content-Type": "application/json"
     }
+
     payload = {
         "channel_id": channel_id,
         "content": message
@@ -84,3 +78,4 @@ def post_message(db: Session, workspace_id: str, channel_id: str, message: str):
     if resp.status_code != 200:
         print("❌ Error posting message:", resp.status_code, resp.text)
         raise Exception(f"ClickUp API error: {resp.text}")
+
