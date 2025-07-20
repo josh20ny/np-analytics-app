@@ -60,22 +60,25 @@ def post_message(db, workspace_id: str, channel_id: str, message: str):
         raise Exception("Missing CLICKUP_BOT_ACCESS_TOKEN")
 
     headers = {
-        "Authorization": token,
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
     }
 
+    url = f"https://api.clickup.com/api/v3/workspaces/{workspace_id}/chat/channels/{channel_id}/messages"
+
     payload = {
-        "channel_id": channel_id,
+        "type": "message",
+        "content_format": "text/md",
         "content": message
     }
 
-    resp = requests.post(
-        "https://api.clickup.com/api/v2/chat/message",
-        headers=headers,
-        json=payload
-    )
+    response = requests.post(url, headers=headers, json=payload)
 
-    if resp.status_code != 200:
-        print("❌ Error posting message:", resp.status_code, resp.text)
-        raise Exception(f"ClickUp API error: {resp.text}")
+    if response.status_code != 201:
+        print("❌ Error posting message (v3):", response.status_code, response.text)
+        raise Exception(f"ClickUp v3 API error: {response.text}")
+    else:
+        print("✅ Message successfully posted via v3")
+
 
