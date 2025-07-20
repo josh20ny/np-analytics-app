@@ -4,7 +4,9 @@ from fastapi import APIRouter, Request, Depends
 from sqlalchemy.orm import Session
 from app.db import get_db
 from clickup_app.assistant_client import get_reply_from_assistant
-from clickup_app.clickup_client import post_message
+from clickup_app.clickup_client import post_message, get_token_by_workspace
+import requests
+import os
 
 router = APIRouter()
 
@@ -44,3 +46,32 @@ async def receive_chat_webhook(request: Request, db: Session = Depends(get_db)):
     except Exception as e:
         print(f"❌ Error during assistant reply: {e}")
         return {"status": "error", "message": str(e)}
+
+
+@router.post("/clickup/register-webhook")
+def register_clickup_webhook(db: Session = Depends(get_db)):
+    workspace_id = os.getenv("CLICKUP_TEAM_ID", "45004558")
+    token = get_token_by_workspace(db, workspace_id)
+    if not token:
+        return {"status": "error", "message": "No ClickUp token found"}
+
+    headers = {
+        "Authorization": token.access_token,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "endpoint": "https://np-analytics-app.onrender.com/webhooks/clickup/chat",
+        "events": ["chat.messageCreated"],
+        "secret": "optional-secret-string"
+    }
+
+    resp = requests.post(
+        f"https://api.clickup.com/api/v2/team/{workspace_id}/webhook",
+        headers=headers,
+        json=payload
+    )
+
+    print("📡 Webhook registration response:", resp.status_code, resp.text)
+    if resp.status_code == 200:
+        return {"status": "success", "webhook_id": resp.json().get("id")}
+    return {"status": "error", "code": resp.status_code, "message": resp.text}
