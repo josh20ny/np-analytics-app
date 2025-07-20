@@ -75,3 +75,22 @@ def register_clickup_webhook(db: Session = Depends(get_db)):
     if resp.status_code == 200:
         return {"status": "success", "webhook_id": resp.json().get("id")}
     return {"status": "error", "code": resp.status_code, "message": resp.text}
+
+
+@router.get("/clickup/debug-token")
+def debug_clickup_token(db: Session = Depends(get_db)):
+    workspace_id = os.getenv("CLICKUP_TEAM_ID", "45004558")
+    token = get_token_by_workspace(db, workspace_id)
+    if not token:
+        return {"status": "error", "message": "No token found"}
+
+    headers = {
+        "Authorization": token.access_token
+    }
+
+    resp = requests.get("https://api.clickup.com/api/v2/team", headers=headers)
+    return {
+        "status": "ok" if resp.status_code == 200 else "error",
+        "response_code": resp.status_code,
+        "response": resp.text
+    }
