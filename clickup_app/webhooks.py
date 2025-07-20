@@ -61,12 +61,13 @@ def register_clickup_webhook(db: Session = Depends(get_db)):
     }
     payload = {
         "endpoint": "https://np-analytics-app.onrender.com/webhooks/clickup/chat",
-        "events": ["chat.messageCreated"],
-        "secret": "optional-secret-string"
+        "events": ["messageCreated"],  # ✅ updated event name
+        "secret": "optional-secret-string",
+        "workspace_id": workspace_id   # ✅ required for chat-view webhook
     }
 
     resp = requests.post(
-        f"https://api.clickup.com/api/v2/team/{workspace_id}/webhook",
+        "https://api.clickup.com/api/v2/webhook/chat-view",  # ✅ new endpoint
         headers=headers,
         json=payload
     )
@@ -75,6 +76,7 @@ def register_clickup_webhook(db: Session = Depends(get_db)):
     if resp.status_code == 200:
         return {"status": "success", "webhook_id": resp.json().get("id")}
     return {"status": "error", "code": resp.status_code, "message": resp.text}
+
 
 
 @router.get("/clickup/debug-token")
