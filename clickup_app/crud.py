@@ -5,7 +5,12 @@ from clickup_app.models import ClickUpToken
 from datetime import datetime, timedelta
 
 def get_token(db: Session, workspace_id: str) -> ClickUpToken | None:
+    """
+    Get the stored token for a given workspace.
+    (This should not contain refresh logic — let clickup_client handle that.)
+    """
     return db.query(ClickUpToken).filter_by(workspace_id=workspace_id).first()
+
 
 def create_or_update_token(
     db: Session,
@@ -18,6 +23,7 @@ def create_or_update_token(
     Upsert the token row for a workspace, setting expires_at based on now + expires_in seconds.
     """
     expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+
     token = get_token(db, workspace_id)
     if token:
         token.access_token  = access_token
@@ -31,5 +37,7 @@ def create_or_update_token(
             expires_at=expires_at
         )
         db.add(token)
+
     db.commit()
     return token
+

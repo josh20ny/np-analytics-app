@@ -42,3 +42,28 @@ def post_message(db: Session, workspace_id: str, channel_id: str, message: str):
         print("❌ Error posting message:", resp.status_code, resp.text)
         raise Exception(f"ClickUp API error: {resp.text}")
 
+def refresh_access_token(db: Session, token_row: ClickUpToken) -> ClickUpToken:
+    from clickup_app.config import CLIENT_ID, CLIENT_SECRET
+
+    resp = requests.post(
+        "https://api.clickup.com/api/v2/oauth/token",
+        data={
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "refresh_token": token_row.refresh_token,
+            "grant_type": "refresh_token",
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+
+    if resp.status_code != 200:
+        raise Exception(f"Failed to refresh token: {resp.text}")
+
+    data = resp.json()
+    return create_or_update_token(
+        db,
+        token_row.workspace_id,
+        data["access_token"],
+        data["refresh_token"],
+        data.get("expires_in", 3600)
+    )
