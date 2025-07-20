@@ -15,19 +15,7 @@ from sqlalchemy.orm       import Session
 
 router = APIRouter()
 
-@router.get("/auth/clickup")
-def clickup_auth():
-    """
-    Redirect user to ClickUp’s OAuth consent page.
-    """
-    params = {
-        "client_id":     CLIENT_ID,
-        "redirect_uri":  REDIRECT_URI,
-        "response_type": "code",
-        "scope":         SCOPES,
-    }
-    authorize_url = f"https://app.clickup.com/api?{urlencode(params)}"
-    return RedirectResponse(authorize_url)
+
 
 
 @router.get("/auth/callback")
