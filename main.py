@@ -12,9 +12,9 @@ from fastapi.responses import PlainTextResponse
 
 app = FastAPI()
 
-@app.get("/", response_class=PlainTextResponse)
+@app.get("/healthz")
 def health_check():
-    return "OK"
+    return {"status": "ok"}
 
 app.include_router(gs_router)
 app.include_router(attendance_router)

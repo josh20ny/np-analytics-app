@@ -3,7 +3,11 @@
 import os
 import time
 import openai
-from datetime import datetime
+from weekly_summary.data_access import (
+    fetch_all_with_yoy,
+    fetch_all_mailchimp_rows_for_latest_week,
+)
+from weekly_summary.formatter import format_summary
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
@@ -11,44 +15,35 @@ ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
 
 def run_assistant_with_tools(prompt: str) -> str:
     print("🧠 Assistant input:", prompt)
+    start = time.time()
 
-    # 1. Create a thread
     thread = openai.beta.threads.create()
-
-    # 2. Add the user message
     openai.beta.threads.messages.create(
         thread_id=thread.id,
         role="user",
         content=prompt
     )
 
-    # 3. Run the assistant
     run = openai.beta.threads.runs.create(
         thread_id=thread.id,
         assistant_id=ASSISTANT_ID
     )
 
-    # 4. Poll for status
-    for i in range(30):
+    for _ in range(30):
         run = openai.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
         if run.status == "completed":
             break
         elif run.status == "requires_action":
-            # Manually call tool function
             tool_outputs = []
             for call in run.required_action.submit_tool_outputs.tool_calls:
                 function_name = call.function.name
                 args = eval(call.function.arguments)
                 print(f"🌐 Calling tool: {function_name} with args: {args}")
-
-                # Dynamically map function name to real API call
                 result = call_tool_function(function_name, args)
-
                 tool_outputs.append({
                     "tool_call_id": call.id,
                     "output": result
                 })
-
             run = openai.beta.threads.runs.submit_tool_outputs(
                 thread_id=thread.id,
                 run_id=run.id,
@@ -57,29 +52,27 @@ def run_assistant_with_tools(prompt: str) -> str:
         else:
             time.sleep(1)
 
-    # 5. Retrieve final assistant message
     messages = openai.beta.threads.messages.list(thread_id=thread.id)
     for m in reversed(messages.data):
         if m.role == "assistant":
+            print("🧠 Assistant finished in", round(time.time() - start, 2), "s")
             return m.content[0].text.value
 
     return "(No reply from assistant)"
 
 
 def call_tool_function(function_name: str, args: dict) -> str:
-    import requests
+    latest = fetch_all_with_yoy()
 
     if function_name == "getCheckinsSummary":
-        r = requests.get("https://np-analytics-app.onrender.com/planning-center/checkins", params=args)
-        return r.text
+        return format_summary(latest)
     elif function_name == "getMailchimpSummary":
-        r = requests.get("https://np-analytics-app.onrender.com/mailchimp/weekly-summary")
-        return r.text
+        mailchimp_rows = fetch_all_mailchimp_rows_for_latest_week()
+        return format_summary(latest, mailchimp_rows)
     elif function_name == "getYouTubeSummary":
-        r = requests.get("https://np-analytics-app.onrender.com/youtube/weekly-summary")
-        return r.text
+        return format_summary(latest)
     elif function_name == "getAdultAttendance":
-        r = requests.get("https://np-analytics-app.onrender.com/attendance/process-sheet")
-        return r.text
+        return format_summary(latest)
     else:
         return f"Unknown tool: {function_name}"
+
