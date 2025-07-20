@@ -16,4 +16,4 @@ REDIRECT_URI  = os.getenv(
 )
 
 # Scope string: add more scopes here as you expand
-SCOPES        = "chat:write chat:webhook chat:read"
+SCOPES        = "chat:write chat:webhook chat:read user:read"
