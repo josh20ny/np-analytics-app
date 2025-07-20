@@ -15,7 +15,16 @@ from sqlalchemy.orm       import Session
 
 router = APIRouter()
 
-
+@router.get("/auth/start")
+def start_auth():
+    from clickup_app.config import CLIENT_ID, REDIRECT_URI, SCOPES
+    url = (
+        "https://app.clickup.com/api"
+        f"?client_id={CLIENT_ID}"
+        f"&redirect_uri={REDIRECT_URI}"
+        f"&scope={SCOPES}"
+    )
+    return {"auth_url": url}
 
 
 @router.get("/auth/callback")
