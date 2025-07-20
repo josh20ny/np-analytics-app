@@ -22,6 +22,8 @@ async def receive_clickup_automation(
     user_id = data.get("userid")
     workspace_id = os.getenv("CLICKUP_TEAM_ID")
 
+    print(f"🔗 Received message from workspace {workspace_id} in channel {channel_id}")
+
     if not content or not channel_id or "@NP Analytics Bot" not in content:
         return {"status": "ignored"}
 
