@@ -15,10 +15,10 @@ async def receive_clickup_automation(request: Request, db: Session = Depends(get
     payload = await request.json()
     print(f"📦 Received automation payload: {payload}")
 
-    # Attempt to parse what we need
-    content = payload.get("content", "") or payload.get("text", "")
-    channel_id = payload.get("chat_id") or payload.get("channel_id")
-    username = payload.get("username") or "someone"
+    data = payload.get("payload", {}).get("data", {})
+    content = data.get("text_content", "")
+    channel_id = data.get("parent")  # chat channel ID
+    username = "someone"  # Could improve by mapping user ID to name
     workspace_id = os.getenv("CLICKUP_TEAM_ID")
 
     if not content or not channel_id:
@@ -32,13 +32,12 @@ async def receive_clickup_automation(request: Request, db: Session = Depends(get
 
     try:
         reply = get_reply_from_assistant(prompt)
-        formatted_reply = f"@{username} {reply}"
+        formatted_reply = f"{reply}"
         post_message(db, workspace_id, channel_id, formatted_reply)
         return {"status": "replied", "message": formatted_reply}
     except Exception as e:
         print(f"❌ Assistant error: {e}")
         return {"status": "error", "message": str(e)}
-
 
 
 @router.post("/clickup/register-webhook")
@@ -54,13 +53,12 @@ def register_clickup_webhook(db: Session = Depends(get_db)):
     }
     payload = {
         "endpoint": "https://np-analytics-app.onrender.com/webhooks/clickup/chat",
-        "events": ["messageCreated"],  # ✅ updated event name
-        "secret": "optional-secret-string",
-        "workspace_id": workspace_id   # ✅ required for chat-view webhook
+        "events": ["taskCommentPosted"],
+        "secret": "optional-secret-string"
     }
 
     resp = requests.post(
-        "https://api.clickup.com/api/v2/webhook/chat-view",  # ✅ new endpoint
+        f"https://api.clickup.com/api/v2/team/{workspace_id}/webhook",
         headers=headers,
         json=payload
     )
@@ -69,23 +67,3 @@ def register_clickup_webhook(db: Session = Depends(get_db)):
     if resp.status_code == 200:
         return {"status": "success", "webhook_id": resp.json().get("id")}
     return {"status": "error", "code": resp.status_code, "message": resp.text}
-
-
-
-@router.get("/clickup/debug-token")
-def debug_clickup_token(db: Session = Depends(get_db)):
-    workspace_id = os.getenv("CLICKUP_TEAM_ID", "45004558")
-    token = get_token_by_workspace(db, workspace_id)
-    if not token:
-        return {"status": "error", "message": "No token found"}
-
-    headers = {
-        "Authorization": token.access_token
-    }
-
-    resp = requests.get("https://api.clickup.com/api/v2/team", headers=headers)
-    return {
-        "status": "ok" if resp.status_code == 200 else "error",
-        "response_code": resp.status_code,
-        "response": resp.text
-    }
