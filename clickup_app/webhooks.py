@@ -1,70 +1,46 @@
+# clickup_app/webhooks.py
+
 from fastapi import APIRouter, Request, Depends
-from app.db import get_db
 from sqlalchemy.orm import Session
+from app.db import get_db
 from clickup_app.assistant_client import get_reply_from_assistant
 from clickup_app.clickup_client import post_message
-
-import json  # 👈 for pretty-printing payloads
 
 router = APIRouter()
 
 @router.post("/webhooks/clickup/chat")
 async def receive_chat_webhook(request: Request, db: Session = Depends(get_db)):
-    print("🚨 Webhook called!")
     payload = await request.json()
-
-    print("📦 Incoming ClickUp Payload:")
-    print(json.dumps(payload, indent=2))  # 🔍 show full JSON structure
-
     event_type = payload.get("event")
-    print(f"🔔 Event Type: {event_type}")
 
-    if event_type == "messageCreated":
-        data = payload.get("data", {})
-        message = data.get("content", "")
-        channel_id = data.get("channel_id")
-        workspace_id = payload.get("team_id")
+    if event_type != "messageCreated":
+        return {"status": "ignored", "reason": f"Unhandled event type: {event_type}"}
 
-        print(f"💬 Message Received: {message}")
-        print(f"📺 Channel ID: {channel_id} | 🧭 Workspace ID: {workspace_id}")
+    data = payload.get("data", {})
+    content = data.get("content", "")
+    channel_id = data.get("channel_id")
+    user_info = data.get("user", {})
+    username = user_info.get("username", "")
+    workspace_id = payload.get("team_id")
 
-        if not (message and channel_id and workspace_id):
-            print("⚠️ Missing content, channel_id, or workspace_id")
-            return {"status": "ignored", "reason": "Missing message or metadata"}
+    if not content or not channel_id or not workspace_id:
+        return {"status": "ignored", "reason": "missing fields"}
 
-        if "@NP Analytics Bot" not in message:
-            print("🙈 Bot not mentioned — ignoring")
-            return {"status": "ignored", "reason": "Bot not mentioned"}
+    print(f"📦 Incoming ClickUp Payload: {content}")
 
-        try:
-            # Clean up prompt
-            cleaned = message.replace("@NP Analytics Bot", "").strip()
-            print(f"🧼 Cleaned Prompt: {cleaned}")
+    # Only respond if bot is tagged
+    if "@NP Analytics Bot" not in content:
+        return {"status": "ignored", "reason": "not mentioned"}
 
-            # Send to Assistant
-            print("⏳ Sending to OpenAI Assistant…")
-            reply = get_reply_from_assistant(cleaned)
-            print(f"✅ Assistant Response: {reply}")
+    # Strip bot mention for cleaner prompt
+    prompt = content.replace("@NP Analytics Bot", "").strip()
+    print(f"⏳ Sending to OpenAI Assistant: {prompt}")
 
-            # Tag user in reply
-            user_info = data.get("user", {})
-            username = user_info.get("username") or user_info.get("email") or "there"
-            mention = f"@{username}"
-            final_reply = f"{mention} {reply}"
-
-            # Post to ClickUp
-            print("📤 Posting reply to ClickUp…")
-            post_message(db, workspace_id, channel_id, final_reply)
-
-            print("✅ Message successfully posted.")
-            return {"status": "replied", "message": final_reply}
-
-        except Exception as e:
-            print(f"❌ Error during assistant handling or post: {e}")
-            return {"status": "error", "message": str(e)}
-
-    print("⚠️ Unsupported event type")
-    return {"status": "ignored", "reason": f"Unhandled event: {event_type}"}
-
-
-
+    try:
+        reply = get_reply_from_assistant(prompt)
+        formatted_reply = f"@{username} {reply}"
+        post_message(db, workspace_id, channel_id, formatted_reply)
+        return {"status": "replied", "message": formatted_reply}
+    except Exception as e:
+        print(f"❌ Error during assistant reply: {e}")
+        return {"status": "error", "message": str(e)}
