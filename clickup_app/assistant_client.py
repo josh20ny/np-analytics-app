@@ -2,96 +2,84 @@
 
 import os
 import time
-import requests
 import openai
-from dotenv import load_dotenv
-
-load_dotenv()
+from datetime import datetime
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
-APP_BASE_URL = "https://np-analytics-app.onrender.com"
 
 
-def call_tool_api(name, args):
-    print(f"🌐 Calling tool: {name} with args: {args}")
+def run_assistant_with_tools(prompt: str) -> str:
+    print("🧠 Assistant input:", prompt)
 
-    if name == "getCheckinsSummary":
-        date = args.get("date")
-        url = f"{APP_BASE_URL}/planning-center/checkins"
-        if date:
-            url += f"?date={date}"
-        resp = requests.get(url, timeout=30)
-        return resp.text
-
-    elif name == "getMailchimpSummary":
-        resp = requests.get(f"{APP_BASE_URL}/mailchimp/weekly-summary", timeout=30)
-        return resp.text
-
-    elif name == "getYouTubeSummary":
-        resp = requests.get(f"{APP_BASE_URL}/youtube/weekly-summary", timeout=30)
-        return resp.text
-
-    elif name == "getAdultAttendance":
-        resp = requests.get(f"{APP_BASE_URL}/attendance/process-sheet", timeout=30)
-        return resp.text
-
-    return f"❌ Unknown tool: {name}"
-
-
-def get_reply_from_assistant(message: str) -> str:
-    print(f"🧠 Assistant input: {message}")
+    # 1. Create a thread
     thread = openai.beta.threads.create()
 
+    # 2. Add the user message
     openai.beta.threads.messages.create(
         thread_id=thread.id,
         role="user",
-        content=message
+        content=prompt
     )
 
+    # 3. Run the assistant
     run = openai.beta.threads.runs.create(
         thread_id=thread.id,
         assistant_id=ASSISTANT_ID
     )
 
-    # Poll for run status
-    for _ in range(30):
-        time.sleep(1)
+    # 4. Poll for status
+    for i in range(30):
         run = openai.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
-        if run.status != "in_progress":
+        if run.status == "completed":
             break
+        elif run.status == "requires_action":
+            # Manually call tool function
+            tool_outputs = []
+            for call in run.required_action.submit_tool_outputs.tool_calls:
+                function_name = call.function.name
+                args = eval(call.function.arguments)
+                print(f"🌐 Calling tool: {function_name} with args: {args}")
 
-    if run.status == "requires_action":
-        tool_outputs = []
-        for tool_call in run.required_action.submit_tool_outputs.tool_calls:
-            func_name = tool_call.function.name
-            args = eval(tool_call.function.arguments)
-            output = call_tool_api(func_name, args)
-            tool_outputs.append({
-                "tool_call_id": tool_call.id,
-                "output": output
-            })
+                # Dynamically map function name to real API call
+                result = call_tool_function(function_name, args)
 
-        run = openai.beta.threads.runs.submit_tool_outputs(
-            thread_id=thread.id,
-            run_id=run.id,
-            tool_outputs=tool_outputs
-        )
+                tool_outputs.append({
+                    "tool_call_id": call.id,
+                    "output": result
+                })
 
-        # Poll again
-        for _ in range(30):
+            run = openai.beta.threads.runs.submit_tool_outputs(
+                thread_id=thread.id,
+                run_id=run.id,
+                tool_outputs=tool_outputs
+            )
+        else:
             time.sleep(1)
-            run = openai.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
-            if run.status != "in_progress":
-                break
 
+    # 5. Retrieve final assistant message
     messages = openai.beta.threads.messages.list(thread_id=thread.id)
-    for msg in messages.data:
-        for content in msg.content:
-            if content.type == "text":
-                print("✅ Assistant final reply:", content.text.value)
-                return content.text.value
+    for m in reversed(messages.data):
+        if m.role == "assistant":
+            return m.content[0].text.value
 
-    return "❌ No assistant reply generated."
+    return "(No reply from assistant)"
 
 
+def call_tool_function(function_name: str, args: dict) -> str:
+    import requests
+
+    if function_name == "getCheckinsSummary":
+        r = requests.get("https://np-analytics-app.onrender.com/planning-center/checkins", params=args)
+        return r.text
+    elif function_name == "getMailchimpSummary":
+        r = requests.get("https://np-analytics-app.onrender.com/mailchimp/weekly-summary")
+        return r.text
+    elif function_name == "getYouTubeSummary":
+        r = requests.get("https://np-analytics-app.onrender.com/youtube/weekly-summary")
+        return r.text
+    elif function_name == "getAdultAttendance":
+        r = requests.get("https://np-analytics-app.onrender.com/attendance/process-sheet")
+        return r.text
+    else:
+        return f"Unknown tool: {function_name}"

@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Request, Depends
 from sqlalchemy.orm import Session
 from app.db import get_db
-from clickup_app.assistant_client import get_reply_from_assistant
+from clickup_app.assistant_client import run_assistant_with_tools
 from clickup_app.clickup_client import post_message, get_token_by_workspace
 import requests
 import os
@@ -31,7 +31,7 @@ async def receive_clickup_automation(request: Request, db: Session = Depends(get
     print(f"🤖 Prompting assistant: {prompt}")
 
     try:
-        reply = get_reply_from_assistant(prompt)
+        reply = run_assistant_with_tools(prompt)
         formatted_reply = f"{reply}"
         post_message(db, workspace_id, channel_id, formatted_reply)
         return {"status": "replied", "message": formatted_reply}
