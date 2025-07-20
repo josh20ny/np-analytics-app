@@ -10,6 +10,7 @@ router = APIRouter()
 
 @router.post("/webhooks/clickup/chat")
 async def receive_chat_webhook(request: Request, db: Session = Depends(get_db)):
+    print("🚨 Webhook called!")
     payload = await request.json()
 
     print("📦 Incoming ClickUp Payload:")
