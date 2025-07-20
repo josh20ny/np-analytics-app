@@ -7,8 +7,14 @@ from app.planning_center.groups import router as pc_groups_router
 from app.youtube.routes import router as yt_router
 from clickup_app.oauth_routes import router as oauth_router
 from clickup_app.webhooks    import router as webhooks_router
+from clickup_app.webhooks import router as clickup_webhooks_router
+from fastapi.responses import PlainTextResponse
 
 app = FastAPI()
+
+@app.get("/", response_class=PlainTextResponse)
+def health_check():
+    return "OK"
 
 app.include_router(gs_router)
 app.include_router(attendance_router)
@@ -18,3 +24,4 @@ app.include_router(pc_groups_router)
 app.include_router(yt_router)
 app.include_router(oauth_router)
 app.include_router(webhooks_router)
+app.include_router(clickup_webhooks_router)
