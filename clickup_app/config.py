@@ -1,20 +1,29 @@
 # clickup_app/config.py
 
 import os
+from dotenv import load_dotenv
 
-# ── Core settings ────────────────────────────────────────────────────
+load_dotenv()  # 📥 pull in .env
+
+# ─── OAuth (for future Team-Bot OAuth flow) ────────────────────────────────
+CLIENT_ID     = os.getenv("CLICKUP_CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLICKUP_CLIENT_SECRET")
+REDIRECT_URI  = os.getenv("CLICKUP_REDIRECT_URI")
+SCOPES        = os.getenv(
+    "CLICKUP_SCOPES",
+    "chat:write,chat:read,chat:webhook,user:read,team:read"
+)
+
+# ─── Chat integration & feature flags ──────────────────────────────────────
+CLICKUP_BOT_ACCESS_TOKEN = os.getenv("CLICKUP_BOT_ACCESS_TOKEN")
 CLICKUP_WORKSPACE_ID     = os.getenv("CLICKUP_WORKSPACE_ID")
 CLICKUP_CHANNEL_ID       = os.getenv("CLICKUP_CHANNEL_ID")
-CLICKUP_BOT_ACCESS_TOKEN = os.getenv("CLICKUP_BOT_ACCESS_TOKEN")
 CLICKUP_FALLBACK_TASK_ID = os.getenv("CLICKUP_BOT_FALLBACK_TASK_ID")
 
-# ── Feature flags ────────────────────────────────────────────────────
-# Toggle between v3 chat vs comment fallback
-toggle = os.getenv("USE_CLICKUP_CHAT_V3", "false").lower()
-USE_CHAT_V3 = toggle in ("1", "true", "yes")
+USE_CLICKUP_CHAT_V3 = (
+    os.getenv("USE_CLICKUP_CHAT_V3", "false").lower() == "true"
+)
 
-# ── Helper validations ─────────────────────────────────────────────────
-if not CLICKUP_BOT_ACCESS_TOKEN:
-    raise RuntimeError("Missing required env var: CLICKUP_BOT_ACCESS_TOKEN")
-if not CLICKUP_WORKSPACE_ID:
-    raise RuntimeError("Missing required env var: CLICKUP_WORKSPACE_ID")
+# ─── API base URLs (overrideable) ─────────────────────────────────────────
+API_BASE_V3 = os.getenv("CLICKUP_API_BASE", "https://api.clickup.com/api/v3")
+API_BASE_V2 = os.getenv("CLICKUP_API_BASE_V2", "https://api.clickup.com/api/v2")
