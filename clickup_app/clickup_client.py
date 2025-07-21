@@ -62,7 +62,7 @@ class ClickUpService:
         url = f"{API_V2_BASE}/task/{task_id}/comment"
         payload = {"comment_text": content}
         headers = {
-            **self.auth_header,
+            "Authorization": self.token,
             "Content-Type": "application/json",
         }
         resp = requests.post(url, headers=headers, json=payload)
