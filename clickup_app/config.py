@@ -1,19 +1,20 @@
 # clickup_app/config.py
 
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+# ── Core settings ────────────────────────────────────────────────────
+CLICKUP_WORKSPACE_ID     = os.getenv("CLICKUP_WORKSPACE_ID")
+CLICKUP_CHANNEL_ID       = os.getenv("CLICKUP_CHANNEL_ID")
+CLICKUP_BOT_ACCESS_TOKEN = os.getenv("CLICKUP_BOT_ACCESS_TOKEN")
+CLICKUP_FALLBACK_TASK_ID = os.getenv("CLICKUP_BOT_FALLBACK_TASK_ID")
 
-# OAuth app credentials (from ClickUp’s App settings)
-CLIENT_ID     = os.getenv("CLICKUP_CLIENT_ID")
-CLIENT_SECRET = os.getenv("CLICKUP_CLIENT_SECRET")
+# ── Feature flags ────────────────────────────────────────────────────
+# Toggle between v3 chat vs comment fallback
+toggle = os.getenv("USE_CLICKUP_CHAT_V3", "false").lower()
+USE_CHAT_V3 = toggle in ("1", "true", "yes")
 
-# Where ClickUp will redirect after auth
-REDIRECT_URI  = os.getenv(
-    "CLICKUP_REDIRECT_URI",
-    "https://78c0a1896c5c.ngrok-free.app/auth/callback"
-)
-
-# Scope string: add more scopes here as you expand
-SCOPES = "chat:write,chat:webhook,chat:read,user:read,team:read"
+# ── Helper validations ─────────────────────────────────────────────────
+if not CLICKUP_BOT_ACCESS_TOKEN:
+    raise RuntimeError("Missing required env var: CLICKUP_BOT_ACCESS_TOKEN")
+if not CLICKUP_WORKSPACE_ID:
+    raise RuntimeError("Missing required env var: CLICKUP_WORKSPACE_ID")
