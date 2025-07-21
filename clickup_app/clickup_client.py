@@ -54,31 +54,30 @@ def get_access_token(db: Session, workspace_id: str) -> str:
     return token.access_token
 
 
-def post_message(db, workspace_id: str, channel_id: str, message: str):
+def post_message(db: Session, workspace_id: str, channel_id: str, content: str, msg_type: str = "message"):
+    """
+    Send a message via ClickUp v3 Chat API.
+    """
     token = os.getenv("CLICKUP_BOT_ACCESS_TOKEN")
     if not token:
         raise Exception("Missing CLICKUP_BOT_ACCESS_TOKEN")
 
+    url = f"{API_BASE}/workspaces/{workspace_id}/chat/channels/{channel_id}/messages"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
-
-    url = f"https://api.clickup.com/api/v3/workspaces/{workspace_id}/chat/channels/{channel_id}/messages"
-
     payload = {
-        "type": "message",
+        "type": msg_type,
         "content_format": "text/md",
-        "content": message
+        "content": content
     }
 
-    response = requests.post(url, headers=headers, json=payload)
-
-    if response.status_code != 201:
-        print("❌ Error posting message (v3):", response.status_code, response.text)
-        raise Exception(f"ClickUp v3 API error: {response.text}")
-    else:
-        print("✅ Message successfully posted via v3")
+    resp = requests.post(url, headers=headers, json=payload)
+    if resp.status_code != 201:
+        print(f"❌ Error posting message (v3): {resp.status_code} {resp.text}")
+        resp.raise_for_status()
+    return resp.json()
 
 
