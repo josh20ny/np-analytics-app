@@ -4,8 +4,17 @@ load_dotenv()
 
 import os
 import time
+import logging
 import requests
+import json
+
 from clickup_app.clickup_client import ClickUpService
+from weekly_summary.data_access import (
+    fetch_all_with_yoy,
+    fetch_all_mailchimp_rows_for_latest_week
+)
+from weekly_summary.formatter import format_summary
+from weekly_summary.report_builder import build_full_report
 
 # Configuration via environment variables
 BASE_URL = os.getenv("BASE_URL", "https://np-analytics-app.onrender.com")
@@ -38,8 +47,8 @@ def call_job(endpoint: str, label: str) -> str:
         return ""
 
 def main():
-    """Run all configured jobs, compile a summary, and post to ClickUp."""
-    # Warm-up ping to ensure the service is responsive
+    """Run all configured jobs, compile a JSON dump, and post to ClickUp."""
+    # 1) Warm-up ping
     try:
         resp = requests.get(f"{BASE_URL.rstrip('/')}/docs", timeout=10)
         print(f"🌐 Warm-up ping returned {resp.status_code}")
@@ -47,17 +56,34 @@ def main():
         print(f"⏱️ Waiting {WAKEUP_DELAY}s for app to spin up…")
         time.sleep(WAKEUP_DELAY)
 
-    # Execute each job and collect outputs
-    results = []
+    # 2) Execute each job and collect JSON outputs
+    outputs = {}
     for endpoint, label in JOBS:
-        result = call_job(endpoint, label)
-        results.append(f"{label} returned: {result}")
+        # show that we’re calling
+        print(f"📡 Calling route: {endpoint} – {label}")
+        
+        # perform the call (call_job also prints status)
+        result_text = call_job(endpoint, label)
+        
+        # echo the raw response text
+        print(f"📥 {label} returned: {result_text}")
+        
+        # attempt to parse as JSON
+        try:
+            outputs[label] = json.loads(result_text or "{}")
+        except json.JSONDecodeError:
+            outputs[label] = {"error": "invalid JSON", "raw": result_text}
+
         time.sleep(WAKEUP_DELAY)
 
-    # Compile report and send via ClickUpService
-    report = "\n\n".join(results)
+    # 3) Build one big JSON report
+    report = json.dumps(outputs, indent=2)
+    print("📝 Compiled JSON report, sending to ClickUp")
+
+    # 4) Send raw JSON dump to ClickUp
     clickup = ClickUpService()
     clickup.send_message(report)
+
 
 if __name__ == "__main__":
     main()
