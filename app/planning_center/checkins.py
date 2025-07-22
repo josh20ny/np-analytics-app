@@ -207,7 +207,7 @@ def summarize_checkins_by_ministry(
         "no_service_time": 0,
         "duplicate_checkin": 0,
     }
-
+    skip_details = [] # (name, ID, reason)
     already_counted = set()  # (pid, ministry, key)
     seen_people_keys = {}    # (first, last, birthdate) → pid
     possible_duplicates = defaultdict(set)  # ministry → set of dedup keys
@@ -266,17 +266,47 @@ def summarize_checkins_by_ministry(
                         break
                 if ministry is None:
                     skipped["no_ministry"] += 1
+                    reason = "no ministry"
+                    if reason:
+                        skip_details.append({
+                            "person_id": pid,
+                            "reason":     reason,
+                            "name":       f"{pinfo.get('first_name','')} {pinfo.get('last_name','')}".strip(),
+                            "email":      pinfo.get("email_address") or pinfo.get("email"),  # or whatever your field is called
+                            "phone":      pinfo.get("phone_number") or pinfo.get("mobile_phone"),
+                        })
+                        del reason
                     continue
 
             svc = determine_service_time(svc_dt, ministry)
             if not svc:
                 skipped["no_service_time"] += 1
+                reason = "no service time"
+                if reason:
+                    skip_details.append({
+                        "person_id": pid,
+                        "reason":     reason,
+                        "name":       f"{pinfo.get('first_name','')} {pinfo.get('last_name','')}".strip(),
+                        "email":      pinfo.get("email_address") or pinfo.get("email"),  # or whatever your field is called
+                        "phone":      pinfo.get("phone_number") or pinfo.get("mobile_phone"),
+                    })
+                    del reason
                 continue
             key = SERVICE_KEY_MAP[svc]
 
             checkin_key = (pid, ministry, key)
             if checkin_key in already_counted:
                 skipped["duplicate_checkin"] += 1
+                reason = "duplicate checkin"
+                if reason:
+                    skip_details.append({
+                        "person_id": pid,
+                        "reason":     reason,
+                        "name":       f"{pinfo.get('first_name','')} {pinfo.get('last_name','')}".strip(),
+                        "email":      pinfo.get("email_address") or pinfo.get("email"),  # or whatever your field is called
+                        "phone":      pinfo.get("phone_number") or pinfo.get("mobile_phone"),
+                    })
+                    del reason
                 continue
             already_counted.add(checkin_key)
 
@@ -327,36 +357,33 @@ def summarize_checkins_by_ministry(
                     demo_col = f"age_{bracket}_{gender}"
                     summary[ministry]["breakdown"][demo_col] += 1
 
+            elif ministry == "Transit":
+                # count kids in grades 6–8
+                if grade in (6, 7, 8):
+                    demo_col = f"grade_{grade}_{gender}"
+                    summary[ministry]["breakdown"][demo_col] += 1
+
+            elif ministry == "InsideOut":
+                # count students in grades 9–12
+                if grade is not None and 9 <= grade <= 12:
+                    demo_col = f"grade_{grade}_{gender}"
+                    summary[ministry]["breakdown"][demo_col] += 1
+
+
         except Exception:
             continue
-
-    # print("\n🔍 Skip Reasons Summary:")
-    # for reason, count in skipped.items():
-    #     print(f" - {reason}: {count}")
-
-    # print("\n🧹 Possible Duplicate Profiles Detected:")
-    # for ministry, dups in possible_duplicates.items():
-    #     print(f" - {ministry}: {len(dups)} potential duplicates")
-
-    # print("\n📋 WRAP-UP SUMMARY")
-    # print("--------------------------")
-    # for ministry, data in summary.items():
-    #     total_count = sum(
-    #         count for key, count in data["breakdown"].items() if key.startswith("attendance_")
-    #     )
-    #     unique_ids = len(data["counted_ids"])
-    #     possible_dupes = len(possible_duplicates.get(ministry, set()))
-
-    #     print(f"📍 {ministry}")
-    #     print(f"   ✅ Total Counted: {total_count}")
-    #     print(f"   👤 Unique People IDs Counted: {unique_ids}")
-    #     print(f"   🧹 Possible Duplicates: {possible_dupes}\n")
 
     output = io.StringIO()
     output.write("\n🔍 Uncounted Planning Center Checkins:\n")
     output.write(f"\n\n📦 Raw check-ins received from API: {len(checkins)}\n\n")
-    for reason, count in skipped.items():
-        output.write(f"- {reason}: {count}\n")
+    for r,c in skipped.items(): output.write(f"- {r}: {c}\n")
+    output.write("\n📋 Details of skipped checkins:\n")
+    for detail in skip_details:
+        pid = detail["person_id"]
+        reason = detail["reason"]
+        p = included_map.get(pid, {})
+        name = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
+        output.write(f"- {pid}: {name}  | reason: {reason}")
 
     output.write("\n\n🧹 Possible Duplicate Profiles Detected:\n")
     for ministry, dups in possible_duplicates.items():
