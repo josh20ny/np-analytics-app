@@ -295,18 +295,21 @@ def summarize_checkins_by_ministry(
             key = SERVICE_KEY_MAP[svc]
 
             checkin_key = (pid, ministry, key)
+            
+            #debug
+            if pid == "114778001":
+                print(f"{skip_details[name]} : {checkin_key[key]}")
+
             if checkin_key in already_counted:
                 skipped["duplicate_checkin"] += 1
                 reason = "duplicate checkin"
-                if reason:
-                    skip_details.append({
-                        "person_id": pid,
-                        "reason":     reason,
-                        "name":       f"{pinfo.get('first_name','')} {pinfo.get('last_name','')}".strip(),
-                        "email":      pinfo.get("email_address") or pinfo.get("email"),  # or whatever your field is called
-                        "phone":      pinfo.get("phone_number") or pinfo.get("mobile_phone"),
-                    })
-                    del reason
+                skip_details.append({
+                    "person_id": pid,
+                    "reason":     reason,
+                    "name":       f"{pinfo.get('first_name','')} {pinfo.get('last_name','')}".strip(),
+                    "email":      pinfo.get("email_address") or pinfo.get("email"),  # or whatever your field is called
+                    "phone":      pinfo.get("phone_number") or pinfo.get("mobile_phone"),
+                })
                 continue
             already_counted.add(checkin_key)
 
@@ -384,6 +387,7 @@ def summarize_checkins_by_ministry(
         p = included_map.get(pid, {})
         name = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
         output.write(f"- {pid}: {name}  | reason: {reason}")
+        print(f"- {pid}: {name}  | reason: {reason}")
 
     output.write("\n\n🧹 Possible Duplicate Profiles Detected:\n")
     for ministry, dups in possible_duplicates.items():

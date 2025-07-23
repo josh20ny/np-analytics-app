@@ -48,8 +48,38 @@ def run(log_output=None, debug_text=""):
     except Exception as e:
         print(f"❌ Error fetching checkins debug summary: {e}")
 
+    # 5) Fetch debug summary from livestreams route
+    livestreams_data = ""
+    try:
+        resp = requests.get(settings.API_BASE_URL.rstrip("/") + "/youtube/livestreams", timeout=30)
+        if resp.ok:
+            data = resp.json()
+            tracked = data.get("livestreams_tracked", [])
+            if tracked:
+                lines = ["📺 Livestreams tracked:"]
+                for item in tracked:
+                    # only include non-null view counts
+                    parts = []
+                    for key in ("initial_views", "views_1w", "views_4w"):
+                        v = item.get(key)
+                        if v is not None:
+                            parts.append(f"{key}={v}")
+                    views_str = ", ".join(parts)
+                    lines.append(
+                        f"- {item['action']} – {item['video_id']} – "
+                        f"{item['title']} ({item['pub_date']}): {views_str}"
+                    )
+                livestreams_debug = "\n".join(lines)
+        else:
+            print(f"⚠️ Failed to fetch livestreams debug summary: {resp.status_code}")
+    except Exception as e:
+        print(f"❌ Error fetching livestreams debug summary: {e}")
+
+    # 6) Merge the two debug blocks
+    combined_debug = "\n\n".join(b for b in (debug_text, livestreams_data) if b)
+
     # 5) Build full report and post to ClickUp
-    full_report = build_full_report(summary, log_output or [], checkins_debug=debug_text)
+    full_report = build_full_report(summary, log_output or [], checkins_debug=combined_debug)
 
     try:
         post_message(db, workspace_id, channel_id, full_report)

@@ -6,7 +6,7 @@ from .analytics_api import get_average_watch_time
 
 
 def get_recent_youtube_livestreams():
-    thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat("T") + "Z"
+    thirtyfive_days_ago = (datetime.utcnow() - timedelta(days=35)).isoformat("T") + "Z"
     search_url = (
         f"https://www.googleapis.com/youtube/v3/search"
         f"?key={settings.YOUTUBE_API_KEY}"
@@ -15,7 +15,7 @@ def get_recent_youtube_livestreams():
         f"&order=date"
         f"&maxResults=25"
         f"&type=video"
-        f"&publishedAfter={thirty_days_ago}"
+        f"&publishedAfter={thirtyfive_days_ago}"
         f"&videoDuration=long"
     )
     items = requests.get(search_url).json().get("items", [])
@@ -93,4 +93,11 @@ def insert_or_update_livestream(conn, video, today):
             avg_watch, today
         )
     )
-    return {"action": action, "video_id": video_id}
+    return {"action":        action,
+            "video_id":      video_id,
+            "title":         title,
+            "pub_date":      pub_date,
+            "initial_views": initial_views,
+            "views_1w":      views_1w,
+            "views_4w":      views_4w
+            }
