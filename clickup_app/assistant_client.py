@@ -3,9 +3,12 @@
 import os
 import time
 import openai
+import json
 from weekly_summary.data_access import (
     fetch_all_with_yoy,
     fetch_all_mailchimp_rows_for_latest_week,
+    fetch_records_for_date,
+    fetch_records_for_range,
 )
 from weekly_summary.formatter import format_summary
 
@@ -73,6 +76,42 @@ def call_tool_function(function_name: str, args: dict) -> str:
         return format_summary(latest)
     elif function_name == "getAdultAttendance":
         return format_summary(latest)
+    # ── New table queries ────────────────────────────────────────
+    elif function_name in {
+        "getAdultAttendance",
+        "getGroupsSummary",
+        "getInsideOutAttendance",
+        "getLivestreams",
+        "getMailchimpWeeklySummary",
+        "getTransitAttendance",
+        "getUpstreetAttendance",
+        "getWaumbaLandAttendance",
+        "getWeeklyYouTubeSummary",
+    }:
+        # Map the tool name to the TABLES key
+        key_map = {
+            "getAdultAttendance":          "AdultAttendance",
+            "getGroupsSummary":            "GroupsSummary",
+            "getInsideOutAttendance":      "InsideOutAttendance",
+            "getLivestreams":              "Livestreams",
+            "getMailchimpWeeklySummary":   "MailchimpSummary",
+            "getTransitAttendance":        "TransitAttendance",
+            "getUpstreetAttendance":       "UpStreetAttendance",
+            "getWaumbaLandAttendance":     "WaumbaLandAttendance",
+            "getWeeklyYouTubeSummary":     "WeeklyYouTubeSummary",
+        }
+        table_key = key_map[function_name]
+
+        # Decide between a single-date or a date-range query
+        if "start_date" in args and "end_date" in args:
+            rows = fetch_records_for_range(table_key, args["start_date"], args["end_date"])
+        elif "date" in args:
+            rows = fetch_records_for_date(table_key, args["date"])
+        else:
+            return f"Missing date or start_date/end_date in args: {args}"
+
+        # Return JSON so the Assistant can format it however you like
+        return json.dumps(rows, default=str)
     else:
         return f"Unknown tool: {function_name}"
 

@@ -25,4 +25,5 @@ token.json
 
 # Text file of the whole porjeect to keep in Chat GPT
 np-analytics-app.txt
+np-analytics-db-structure.txt
 token.json

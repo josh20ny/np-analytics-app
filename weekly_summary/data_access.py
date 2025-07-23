@@ -61,3 +61,38 @@ def fetch_all_mailchimp_rows_for_latest_week() -> list[dict]:
             ORDER BY audience_name
         """, conn)
         return df.to_dict(orient="records")
+    
+    
+def fetch_records_for_date(key: str, date_value: str) -> list[dict]:
+    """
+    key must be one of the keys in TABLES (e.g. "AdultAttendance", "GroupsSummary", etc.).
+    date_value should be an ISO date string, e.g. "2025-04-01".
+    """
+    tbl, date_col = TABLES[key]
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            text(f"SELECT * FROM {tbl} WHERE {date_col} = :date"),
+            conn,
+            params={"date": date_value},
+            parse_dates=[date_col]
+        )
+    return df.to_dict(orient="records")
+
+def fetch_records_for_range(key: str, start_date: str, end_date: str) -> list[dict]:
+    """
+    Fetch rows where date_col BETWEEN start_date AND end_date (inclusive).
+    Both dates should be ISO strings, e.g. "2025-04-01", "2025-04-30".
+    """
+    tbl, date_col = TABLES[key]
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            text(
+                f"SELECT * FROM {tbl}"
+                f" WHERE {date_col} BETWEEN :start AND :end"
+                f" ORDER BY {date_col}"
+            ),
+            conn,
+            params={"start": start_date, "end": end_date},
+            parse_dates=[date_col]
+        )
+    return df.to_dict(orient="records")
