@@ -9,6 +9,7 @@ from weekly_summary.data_access import (
     fetch_all_mailchimp_rows_for_latest_week,
     fetch_records_for_date,
     fetch_records_for_range,
+    aggregate_total_attendance
 )
 from weekly_summary.formatter import format_summary
 
@@ -107,6 +108,35 @@ def call_tool_function(function_name: str, args: dict) -> str:
             rows = fetch_records_for_range(table_key, args["start_date"], args["end_date"])
         elif "date" in args:
             rows = fetch_records_for_date(table_key, args["date"])
+        # ── Compare two adult–attendance ranges ──────────────────────────────
+        elif function_name == "compareAdultAttendance":
+            # Expect args: year1, year2, month (1–12), or explicit start/end dates
+            if {"year1","year2","month"} <= args.keys():
+                import calendar
+                y1, y2, m = args["year1"], args["year2"], args["month"]
+                # build ISO ranges
+                sd1 = f"{y1:04d}-{m:02d}-01"
+                ed1 = f"{y1:04d}-{m:02d}-{calendar.monthrange(y1,m)[1]}"
+                sd2 = f"{y2:04d}-{m:02d}-01"
+                ed2 = f"{y2:04d}-{m:02d}-{calendar.monthrange(y2,m)[1]}"
+            elif {"start1","end1","start2","end2"} <= args.keys():
+                sd1, ed1 = args["start1"], args["end1"]
+                sd2, ed2 = args["start2"], args["end2"]
+            else:
+                return "Missing required args: either year1/year2/month or start1/end1/start2/end2."
+
+            total1 = aggregate_total_attendance("AdultAttendance", sd1, ed1)
+            total2 = aggregate_total_attendance("AdultAttendance", sd2, ed2)
+            delta  = total2 - total1
+            pct    = (delta / total1 * 100) if total1 else None
+
+            result = {
+                "range1": {"start": sd1, "end": ed1, "total": total1},
+                "range2": {"start": sd2, "end": ed2, "total": total2},
+                "difference": delta,
+                "percent_change": round(pct,1) if pct is not None else None
+            }
+            return json.dumps(result)
         else:
             return f"Missing date or start_date/end_date in args: {args}"
 

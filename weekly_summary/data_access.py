@@ -62,7 +62,7 @@ def fetch_all_mailchimp_rows_for_latest_week() -> list[dict]:
         """, conn)
         return df.to_dict(orient="records")
     
-    
+
 def fetch_records_for_date(key: str, date_value: str) -> list[dict]:
     """
     key must be one of the keys in TABLES (e.g. "AdultAttendance", "GroupsSummary", etc.).
@@ -96,3 +96,20 @@ def fetch_records_for_range(key: str, start_date: str, end_date: str) -> list[di
             parse_dates=[date_col]
         )
     return df.to_dict(orient="records")
+
+def aggregate_total_attendance(table_key: str, start_date: str, end_date: str) -> int:
+    """
+    Return SUM(total_attendance) for a given table_key between start_date and end_date (inclusive).
+    """
+    tbl, date_col = TABLES[table_key]
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            text(
+                f"SELECT COALESCE(SUM(total_attendance),0) AS total "
+                f"FROM {tbl} "
+                f"WHERE {date_col} BETWEEN :start AND :end"
+            ),
+            conn,
+            params={"start": start_date, "end": end_date},
+        )
+    return int(df["total"].iloc[0])
