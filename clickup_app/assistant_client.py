@@ -4,14 +4,16 @@ import os
 import time
 import openai
 import json
-from weekly_summary.data_access import (
+from clickup_app.assistant_tools import (
     fetch_all_with_yoy,
     fetch_all_mailchimp_rows_for_latest_week,
     fetch_records_for_date,
     fetch_records_for_range,
-    aggregate_total_attendance
+    aggregate_total_attendance,
+    format_summary,
+    build_full_report,
 )
-from weekly_summary.formatter import format_summary
+
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")

@@ -3,9 +3,12 @@
 from datetime import date
 from sqlalchemy.orm import Session
 from app.db import get_db
-from weekly_summary.data_access import fetch_all_with_yoy
-from weekly_summary.formatter import format_summary
-from weekly_summary.report_builder import build_full_report
+from clickup_app.assistant_tools import (
+    fetch_all_with_yoy,
+    fetch_all_mailchimp_rows_for_latest_week,
+    format_summary,
+    build_full_report,
+)
 from clickup_app.clickup_client import post_message
 from clickup_app.crud import get_token
 from weekly_summary.data_access import fetch_all_with_yoy, fetch_all_mailchimp_rows_for_latest_week
