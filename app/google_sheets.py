@@ -39,6 +39,7 @@ def process_adult_attendance_from_sheet():
     rows = result.get("values", [])
 
     updates = []
+    summary = []
     conn = get_conn()
     cur = conn.cursor()
 
@@ -90,6 +91,17 @@ def process_adult_attendance_from_sheet():
             "values": [["✅"]]
         })
 
+        summary.append({
+            "date": dt,
+            "attendance_930": a930,
+            "percent_capacity_930": pc_930,
+            "percent_distrobution_930": pd_930,
+            "attendance_1100": a1100,
+            "percent_capacity_1100": pc_1100,
+            "percent_distrobution_1100": pd_1100,
+            "total_attendance": total,
+        })
+
     conn.commit()
     cur.close()
     conn.close()
@@ -101,7 +113,7 @@ def process_adult_attendance_from_sheet():
             body={"valueInputOption": "RAW", "data": updates}
         ).execute()
 
-    return {"status": "done", "processed_rows": len(updates)}
+    return {"status": "done", "processed_rows": len(updates), "summary": summary}
 
 @router.get("/process")
 def trigger_process():
