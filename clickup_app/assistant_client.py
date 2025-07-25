@@ -49,9 +49,7 @@ def run_assistant_with_tools(prompt: str) -> str:
     # Run the assistant with tool support
     run = openai.beta.threads.runs.create(
         thread_id=thread.id,
-        assistant_id=ASSISTANT_ID,
-        functions=FUNCTIONS,
-        function_call="auto"
+        assistant_id=ASSISTANT_ID
     )
 
     # Poll until completed or tool action is required

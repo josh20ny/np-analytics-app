@@ -1,26 +1,20 @@
-# run_jobs.py
-from dotenv import load_dotenv
-load_dotenv()
-
 import os
 import time
-import logging
-import requests
 import json
+import requests
 
+from dotenv import load_dotenv
 from clickup_app.clickup_client import ClickUpService
-from weekly_summary.data_access import (
-    fetch_all_with_yoy,
-    fetch_all_mailchimp_rows_for_latest_week
-)
-from weekly_summary.formatter import format_summary
-from weekly_summary.report_builder import build_full_report
+from clickup_app.assistant_client import run_assistant_with_tools
 
-# Configuration via environment variables
+# Load environment variables
+load_dotenv()
+
+# Configuration
 BASE_URL = os.getenv("BASE_URL", "https://np-analytics-app.onrender.com")
 WAKEUP_DELAY = int(os.getenv("WAKEUP_DELAY", "10"))
 
-# List of API routes and their descriptive labels
+# List of API endpoints to call and their labels
 JOBS = [
     ("/youtube/weekly-summary", "YouTube weekly summary"),
     ("/youtube/livestreams", "YouTube livestream tracking"),
@@ -30,59 +24,59 @@ JOBS = [
     ("/planning-center/checkins", "Planning Center check-ins"),
 ]
 
+
 def call_job(endpoint: str, label: str) -> str:
-    """Call an API route and log its result."""
+    """Call an API route and return its raw text response."""
     print(f"📡 Calling route: {endpoint} – {label}")
     try:
-        response = requests.get(f"{BASE_URL.rstrip('/')}{endpoint}")
-        status = response.status_code
-        if status == 200:
-            print(f"✅ Finished: {label}: {status}")
+        response = requests.get(f"{BASE_URL.rstrip('/')}{endpoint}", timeout=30)
+        if response.status_code == 200:
+            print(f"✅ Finished: {label} (200)")
             return response.text or ""
         else:
-            print(f"❌ Failed: {label}: {status}")
+            print(f"❌ Failed: {label} ({response.status_code})")
             return ""
     except Exception as e:
         print(f"❌ Error calling {endpoint}: {e}")
         return ""
 
+
 def main():
-    """Run all configured jobs, compile a JSON dump, and post to ClickUp."""
-    # 1) Warm-up ping
+    """Run all jobs, compile JSON, ask Assistant for summary, and post to ClickUp."""
+    # Warm-up ping to ensure the service is up
     try:
-        resp = requests.get(f"{BASE_URL.rstrip('/')}/docs", timeout=10)
-        print(f"🌐 Warm-up ping returned {resp.status_code}")
+        ping = requests.get(f"{BASE_URL.rstrip('/')}/docs", timeout=10)
+        print(f"🌐 Warm-up ping returned {ping.status_code}")
     except Exception:
         print(f"⏱️ Waiting {WAKEUP_DELAY}s for app to spin up…")
         time.sleep(WAKEUP_DELAY)
 
-    # 2) Execute each job and collect JSON outputs
-    outputs = {}
+    # Execute each job and collect raw JSON
+    outputs: dict[str, any] = {}
     for endpoint, label in JOBS:
-        # show that we’re calling
-        print(f"📡 Calling route: {endpoint} – {label}")
-        
-        # perform the call (call_job also prints status)
-        result_text = call_job(endpoint, label)
-        
-        # echo the raw response text
-        print(f"📥 {label} returned: {result_text}")
-        
-        # attempt to parse as JSON
+        raw = call_job(endpoint, label)
+        print(f"📥 {label} returned: {raw}")
         try:
-            outputs[label] = json.loads(result_text or "{}")
+            outputs[label] = json.loads(raw or "{}")
         except json.JSONDecodeError:
-            outputs[label] = {"error": "invalid JSON", "raw": result_text}
-
+            outputs[label] = {"error": "invalid JSON", "raw": raw}
         time.sleep(WAKEUP_DELAY)
 
-    # 3) Build one big JSON report
+    # Compile a single JSON report
     report = json.dumps(outputs, indent=2)
-    print("📝 Compiled JSON report, sending to ClickUp")
+    print("📝 Compiled JSON report")
 
-    # 4) Send raw JSON dump to ClickUp
+    # Prompt the Assistant
+    prompt = (
+        "Can you turn this JSON data into a nice summary of this week's data?"
+        f"\n\n{report}"
+    )
+    summary = run_assistant_with_tools(prompt)
+    print("📝 Assistant summary generated")
+
+    # Post the summary to ClickUp
     clickup = ClickUpService()
-    clickup.send_message(report)
+    clickup.send_message(summary)
 
 
 if __name__ == "__main__":
