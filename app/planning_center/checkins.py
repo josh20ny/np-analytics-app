@@ -182,9 +182,9 @@ def determine_service_time(dt: datetime, ministry: str) -> str | None:
     if time(15, 15) <= t <= time(17, 30):
         return "4:30 PM"
     else:  # Waumba, UpStreet, Transit
-        if time(8, 30) <= t <= time(10, 30):
+        if time(8, 30) <= t <= time(10, 15):
             return "9:30 AM"
-        if time(10, 30) <= t <= time(12, 0):
+        if time(10, 15) <= t <= time(12, 0):
             return "11:00 AM"
 
     return None  # Invalid time for this ministry
@@ -295,10 +295,6 @@ def summarize_checkins_by_ministry(
             key = SERVICE_KEY_MAP[svc]
 
             checkin_key = (pid, ministry, key)
-            
-            #debug
-            if pid == "114778001":
-                print(f"{skip_details[name]} : {checkin_key[key]}")
 
             if checkin_key in already_counted:
                 skipped["duplicate_checkin"] += 1
@@ -376,38 +372,14 @@ def summarize_checkins_by_ministry(
         except Exception:
             continue
 
-    output = io.StringIO()
-    output.write("\n🔍 Uncounted Planning Center Checkins:\n")
-    output.write(f"\n\n📦 Raw check-ins received from API: {len(checkins)}\n\n")
-    for r,c in skipped.items(): output.write(f"- {r}: {c}\n")
-    output.write("\n📋 Details of skipped checkins:\n")
-    for detail in skip_details:
-        pid = detail["person_id"]
-        reason = detail["reason"]
-        p = included_map.get(pid, {})
-        name = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
-        output.write(f"- {pid}: {name}  | reason: {reason}")
-        print(f"- {pid}: {name}  | reason: {reason}")
-
-    output.write("\n\n🧹 Possible Duplicate Profiles Detected:\n")
-    for ministry, dups in possible_duplicates.items():
-        output.write(f"- {ministry}: {len(dups)} potential duplicates\n")
-
-    output.write("\n📋 WRAP-UP SUMMARY\n--------------------------\n")
-    for ministry, data in summary.items():
-        total_count = sum(
-            count for key, count in data["breakdown"].items() if key.startswith("attendance_")
-        )
-        unique_ids = len(data["counted_ids"])
-        possible_dupes = len(possible_duplicates.get(ministry, set()))
-        output.write(f"📍 {ministry}\n")
-        output.write(f"   ✅ Total Counted: {total_count}\n")
-        output.write(f"   👤 Unique People IDs Counted: {unique_ids}\n")
-        output.write(f"   🧹 Possible Duplicates: {possible_dupes}\n\n")
-    return (
-        {k: v["breakdown"] for k, v in summary.items()},
-        output.getvalue().strip()
-    )
+    # Build final JSON output
+    return {
+        "breakdown": {k: v["breakdown"] for k, v in summary.items()},
+        "uncounted_reasons": skipped,
+        "skip_details": skip_details,
+        "possible_duplicates": {ministry: len(dups)
+                                  for ministry, dups in possible_duplicates.items()}
+    }
 
 
 def insert_summary_into_db(ministry: str, data: dict):
@@ -438,45 +410,25 @@ def insert_summary_into_db(ministry: str, data: dict):
     conn.close()
 
 
-@router.get("")
+@router.get("", response_model=dict)
 async def run_checkin_summary(date: str | None = None):
     if date:
-        date = datetime.fromisoformat(date).date()
+        as_date = datetime.fromisoformat(date).date()
     else:
-        date = get_last_sunday()
+        # Compute last Sunday
+        now = datetime.now(tz=ZoneInfo("America/Chicago"))
+        as_date = (now - timedelta(days=(now.weekday() + 1) % 7)).date()
 
-    checkins, included = fetch_all_checkins(date)
-
+    checkins, included = fetch_all_checkins(as_date)
     people = parse_people_data(included)
     person_created = parse_person_created_dates(included)
     events = parse_event_data(included)
 
-    # 🧠 Always generate this
-    raw_sum, debug_text = summarize_checkins_by_ministry(checkins, people, person_created, events)
+    result = summarize_checkins_by_ministry(checkins, people, person_created, events)
 
-    for m, data in raw_sum.items():
-        data["date"] = date
-        if m == "InsideOut":
-            data["total_attendance"] = data.get("attendance_1630", 0)
-            data["new_students"]     = data.get("new_kids_1630", 0)
-        else:
-            data["total_attendance"] = data.get("attendance_930", 0) + data.get("attendance_1100", 0)
-            data["total_new_kids"] = data.get("new_kids_930", 0) + data.get("new_kids_1100", 0)
+    # Optionally insert into DB, then return JSON
+    for ministry, data in result["breakdown"].items():
+        data["date"] = as_date
+        insert_summary_into_db(ministry, data)
 
-        if data.get("total_attendance", 0) == 0:
-            continue
-
-        data["notes"] = None
-        for col in MINISTRY_COLUMNS[m]:
-            data.setdefault(col, 0 if col != "notes" else None)
-
-        insert_summary_into_db(m, data)
-
-    return {
-        "status": "success",
-        "date": str(date),
-        "checkins_count": len(checkins),
-        "included_count": len(included),
-        "summaries": {m: dict(cnts) for m, cnts in raw_sum.items()},
-        "debug_text": debug_text  # ✅ always included now
-    }
+    return {"status": "success", "date": str(as_date), **result}
