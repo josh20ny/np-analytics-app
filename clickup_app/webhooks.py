@@ -4,6 +4,8 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from clickup_app.clickup_client import ClickUpService
 from clickup_app.assistant_client import run_assistant_with_tools
+from clickup_app.assistant_tools import format_summary
+
 import os
 
 router = APIRouter()
