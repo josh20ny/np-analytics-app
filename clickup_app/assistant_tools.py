@@ -5,12 +5,13 @@ from sqlalchemy import create_engine
 from dateutil.relativedelta import relativedelta
 from datetime import timedelta, date
 from sqlalchemy.sql import text
+import calendar
 
 from weekly_summary.config import DATABASE_URL
 
 # ── 1) TABLES mapping ──────────────────────────────────────────────────────────
 TABLES = {
-    "AdultAttendance":      ("adult_attendance",          "date"),
+    "AdultAttendance":      ("adult_attendance",         "date"),
     "GroupsSummary":        ("groups_summary",           "date"),
     "InsideOutAttendance":  ("insideout_attendance",     "date"),
     "Livestreams":          ("livestreams",              "published_at"),
@@ -95,11 +96,10 @@ def fetch_records_for_range(key: str, start_date: str, end_date: str) -> list[di
     return df.to_dict(orient="records")
 
 def aggregate_total_attendance(table_key: str, start_date: str, end_date: str) -> int:
-    """SUM(total_attendance) between start & end :contentReference[oaicite:4]{index=4}"""
     tbl, date_col = TABLES[table_key]
     with engine.connect() as conn:
         df = pd.read_sql(
-            text(
+            text(  # <-- text() is required to bind :start and :end
                 f"SELECT COALESCE(SUM(total_attendance),0) AS total "
                 f"FROM {tbl} "
                 f"WHERE {date_col} BETWEEN :start AND :end"
@@ -108,6 +108,19 @@ def aggregate_total_attendance(table_key: str, start_date: str, end_date: str) -
             params={"start": start_date, "end": end_date},
         )
     return int(df["total"].iloc[0])
+
+def compare_adult_attendance(year1: int, year2: int, month: int) -> dict[str, int]:
+    results = {}
+    for y in (year1, year2):
+        # build YYYY-MM-DD range for that month
+        start = date(y, month, 1).isoformat()
+        last_day = calendar.monthrange(y, month)[1]
+        end   = date(y, month, last_day).isoformat()
+
+        # NOTE: the key must match TABLES["AdultAttendance"]
+        total = aggregate_total_attendance("AdultAttendance", start, end)
+        results[f"{y}"] = total
+    return results
 
 # ── 2) Formatting & report builder ──────────────────────────────────────────────
 from weekly_summary.formatter       import format_summary       # :contentReference[oaicite:5]{index=5}
