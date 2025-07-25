@@ -44,7 +44,7 @@ def fetch_all_with_yoy() -> dict[str, dict[str, dict]]:
             dt_lastyear = row_cur[date_col] - timedelta(weeks=52)
             iso = dt_lastyear.isoformat()
             df_pri = pd.read_sql(
-                f"SELECT * FROM {tbl} WHERE {date_col} = :iso LIMIT 1",
+                text(f"SELECT * FROM {tbl} WHERE {date_col} = :iso LIMIT 1"),
                 engine,
                 params={"iso": iso},
                 parse_dates=[date_col]
