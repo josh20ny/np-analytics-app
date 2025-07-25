@@ -425,10 +425,18 @@ async def run_checkin_summary(date: str | None = None):
     events = parse_event_data(included)
 
     result = summarize_checkins_by_ministry(checkins, people, person_created, events)
-
+    processed_count = sum(
+    sum(mini.values())
+    for mini in result["breakdown"].values()
+    )
     # Optionally insert into DB, then return JSON
     for ministry, data in result["breakdown"].items():
         data["date"] = as_date
         insert_summary_into_db(ministry, data)
 
-    return {"status": "success", "date": str(as_date), **result}
+    return {
+        "status": "success",
+        "date": str(as_date),
+        "checkins_count": processed_count,
+        **result
+    }
