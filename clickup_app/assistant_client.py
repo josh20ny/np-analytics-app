@@ -1,5 +1,3 @@
-# clickup_app/assistant_client.py
-
 import os
 import time
 import openai
@@ -10,19 +8,37 @@ from clickup_app.assistant_tools import (
     fetch_records_for_date,
     fetch_records_for_range,
     aggregate_total_attendance,
+    compare_adult_attendance,
     format_summary,
     build_full_report,
 )
 
-
 openai.api_key = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
+
+# Define available tools for the Assistant
+FUNCTIONS = [
+    {
+        "name": "compareAdultAttendance",
+        "description": "Compare adult attendance year-over-year for two given years and a specific month",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "year1": {"type": "integer", "description": "First year, e.g. 2024"},
+                "year2": {"type": "integer", "description": "Second year, e.g. 2025"},
+                "month": {"type": "integer", "minimum": 1, "maximum": 12, "description": "Month number (1-12)"},
+            },
+            "required": ["year1", "year2", "month"],
+        },
+    },
+]
 
 
 def run_assistant_with_tools(prompt: str) -> str:
     print("🧠 Assistant input:", prompt)
     start = time.time()
 
+    # Create a conversation thread
     thread = openai.beta.threads.create()
     openai.beta.threads.messages.create(
         thread_id=thread.id,
@@ -30,26 +46,31 @@ def run_assistant_with_tools(prompt: str) -> str:
         content=prompt
     )
 
+    # Run the assistant with tool support
     run = openai.beta.threads.runs.create(
         thread_id=thread.id,
-        assistant_id=ASSISTANT_ID
+        assistant_id=ASSISTANT_ID,
+        functions=FUNCTIONS,
+        function_call="auto"
     )
 
+    # Poll until completed or tool action is required
     for _ in range(30):
         run = openai.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
         if run.status == "completed":
             break
-        elif run.status == "requires_action":
+        if run.status == "requires_action":
             tool_outputs = []
             for call in run.required_action.submit_tool_outputs.tool_calls:
                 function_name = call.function.name
-                args = eval(call.function.arguments)
+                args = json.loads(call.function.arguments)
                 print(f"🌐 Calling tool: {function_name} with args: {args}")
                 result = call_tool_function(function_name, args)
                 tool_outputs.append({
                     "tool_call_id": call.id,
                     "output": result
                 })
+
             run = openai.beta.threads.runs.submit_tool_outputs(
                 thread_id=thread.id,
                 run_id=run.id,
@@ -58,6 +79,7 @@ def run_assistant_with_tools(prompt: str) -> str:
         else:
             time.sleep(1)
 
+    # Extract the final assistant message
     messages = openai.beta.threads.messages.list(thread_id=thread.id)
     for m in reversed(messages.data):
         if m.role == "assistant":
@@ -68,82 +90,50 @@ def run_assistant_with_tools(prompt: str) -> str:
 
 
 def call_tool_function(function_name: str, args: dict) -> str:
+    # Fetch baseline data
     latest = fetch_all_with_yoy()
 
+    # Handle custom tool calls
+    if function_name == "compareAdultAttendance":
+        # Delegate to the assistant_tools helper
+        result = compare_adult_attendance(
+            year1=args.get("year1"),
+            year2=args.get("year2"),
+            month=args.get("month")
+        )
+        return json.dumps(result)
+
+    # Generic summary functions
     if function_name == "getCheckinsSummary":
         return format_summary(latest)
-    elif function_name == "getMailchimpSummary":
-        mailchimp_rows = fetch_all_mailchimp_rows_for_latest_week()
-        return format_summary(latest, mailchimp_rows)
-    elif function_name == "getYouTubeSummary":
-        return format_summary(latest)
-    elif function_name == "getAdultAttendance":
-        return format_summary(latest)
-    # ── New table queries ────────────────────────────────────────
-    elif function_name in {
-        "getAdultAttendance",
-        "getGroupsSummary",
-        "getInsideOutAttendance",
-        "getLivestreams",
-        "getMailchimpWeeklySummary",
-        "getTransitAttendance",
-        "getUpstreetAttendance",
-        "getWaumbaLandAttendance",
-        "getWeeklyYouTubeSummary",
-    }:
-        # Map the tool name to the TABLES key
-        key_map = {
-            "getAdultAttendance":          "AdultAttendance",
-            "getGroupsSummary":            "GroupsSummary",
-            "getInsideOutAttendance":      "InsideOutAttendance",
-            "getLivestreams":              "Livestreams",
-            "getMailchimpWeeklySummary":   "MailchimpSummary",
-            "getTransitAttendance":        "TransitAttendance",
-            "getUpstreetAttendance":       "UpStreetAttendance",
-            "getWaumbaLandAttendance":     "WaumbaLandAttendance",
-            "getWeeklyYouTubeSummary":     "WeeklyYouTubeSummary",
-        }
-        table_key = key_map[function_name]
+    if function_name == "getMailchimpSummary":
+        rows = fetch_all_mailchimp_rows_for_latest_week()
+        return format_summary(latest, rows)
 
-        # Decide between a single-date or a date-range query
+    # Table-based queries
+    table_tools = {
+        "getAdultAttendance": "AdultAttendance",
+        "getGroupsSummary": "GroupsSummary",
+        "getInsideOutAttendance": "InsideOutAttendance",
+        "getLivestreams": "Livestreams",
+        "getMailchimpWeeklySummary": "MailchimpSummary",
+        "getTransitAttendance": "TransitAttendance",
+        "getUpstreetAttendance": "UpStreetAttendance",
+        "getWaumbaLandAttendance": "WaumbaLandAttendance",
+        "getWeeklyYouTubeSummary": "WeeklyYouTubeSummary",
+    }
+
+    if function_name in table_tools:
+        key = table_tools[function_name]
+        # Determine query type
         if "start_date" in args and "end_date" in args:
-            rows = fetch_records_for_range(table_key, args["start_date"], args["end_date"])
+            rows = fetch_records_for_range(key, args["start_date"], args["end_date"])
         elif "date" in args:
-            rows = fetch_records_for_date(table_key, args["date"])
-        # ── Compare two adult–attendance ranges ──────────────────────────────
-        elif function_name == "compareAdultAttendance":
-            # Expect args: year1, year2, month (1–12), or explicit start/end dates
-            if {"year1","year2","month"} <= args.keys():
-                import calendar
-                y1, y2, m = args["year1"], args["year2"], args["month"]
-                # build ISO ranges
-                sd1 = f"{y1:04d}-{m:02d}-01"
-                ed1 = f"{y1:04d}-{m:02d}-{calendar.monthrange(y1,m)[1]}"
-                sd2 = f"{y2:04d}-{m:02d}-01"
-                ed2 = f"{y2:04d}-{m:02d}-{calendar.monthrange(y2,m)[1]}"
-            elif {"start1","end1","start2","end2"} <= args.keys():
-                sd1, ed1 = args["start1"], args["end1"]
-                sd2, ed2 = args["start2"], args["end2"]
-            else:
-                return "Missing required args: either year1/year2/month or start1/end1/start2/end2."
-
-            total1 = aggregate_total_attendance("AdultAttendance", sd1, ed1)
-            total2 = aggregate_total_attendance("AdultAttendance", sd2, ed2)
-            delta  = total2 - total1
-            pct    = (delta / total1 * 100) if total1 else None
-
-            result = {
-                "range1": {"start": sd1, "end": ed1, "total": total1},
-                "range2": {"start": sd2, "end": ed2, "total": total2},
-                "difference": delta,
-                "percent_change": round(pct,1) if pct is not None else None
-            }
-            return json.dumps(result)
+            rows = fetch_records_for_date(key, args["date"])
         else:
-            return f"Missing date or start_date/end_date in args: {args}"
-
-        # Return JSON so the Assistant can format it however you like
+            return f"Missing date or range parameters for {function_name}: {args}"
         return json.dumps(rows, default=str)
-    else:
-        return f"Unknown tool: {function_name}"
+
+    return f"Unknown tool: {function_name}"
+
 
