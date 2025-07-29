@@ -9,62 +9,73 @@ router = APIRouter(prefix="/planning-center/groups", tags=["Planning Center"])
 
 def get_planning_center_headers():
     """
-    Build headers for Basic auth using OAuth App ID & Secret.
+    Build headers for Basic auth using App ID & Secret.
     """
     auth = f"{settings.PLANNING_CENTER_APP_ID}:{settings.PLANNING_CENTER_SECRET}"
     token = base64.b64encode(auth.encode()).decode()
     return {
         "Authorization": f"Basic {token}",
-        "Accept":        "application/vnd.api+json"
+        "Accept":        "application/vnd.api+json",
     }
 
 
-def fetch_all_groups():
+def fetch_groups_by_type(type_name: str, name: str = None) -> list:
     """
-    Returns a list of active Group objects of type "Groups" from /groups/v2/groups, paging as needed.
+    Fetch all active groups of a given GroupType name. Optionally filter by group name.
     """
     headers = get_planning_center_headers()
     url = "https://api.planningcenteronline.com/groups/v2/groups"
     params = {"include[]": "group_type", "per_page": 100}
-    filtered = []
+    results = []
     group_types = {}
 
-    # page through groups
     while url:
         resp = requests.get(url, headers=headers, params=params, timeout=30)
         resp.raise_for_status()
-        body = resp.json()
+        data = resp.json()
 
-        # build group_type lookup
-        for inc in body.get("included", []):
+        # build type lookup
+        for inc in data.get("included", []):
             if inc.get("type") == "GroupType":
                 group_types[inc["id"]] = inc.get("attributes", {}).get("name", "")
 
-        # filter active Groups-type groups
-        for g in body.get("data", []):
+        # filter by type (and name if provided)
+        for g in data.get("data", []):
             attrs = g.get("attributes", {})
             rel = g.get("relationships", {}).get("group_type", {}).get("data")
             if attrs.get("archived_at") is None and rel:
-                if group_types.get(rel.get("id")) == "Groups":
-                    filtered.append(g)
+                if group_types.get(rel.get("id")) == type_name:
+                    if not name or attrs.get("name") == name:
+                        results.append(g)
+                        if name:
+                            return results
 
-        url = body.get("links", {}).get("next")
+        url = data.get("links", {}).get("next")
         params = {"include[]": "group_type"}
 
-    return filtered
+    return results
 
 
-def fetch_unique_counts(group_ids: set):
+def summarize_groups():
     """
-    Pages through each group's memberships endpoint to accumulate:
-      - unique_people: set of unique person IDs
-      - group_leaders: set of unique person IDs with role "leader"
-    Returns (unique_people_count, group_leaders_count).
+    Fetches group and membership data to compute metrics in a single pass.
     """
-    headers = get_planning_center_headers()
+    # fetch all active "Groups" groups
+    groups = fetch_groups_by_type("Groups")
+    number_of_groups = len(groups)
+    group_ids = {g.get("id") for g in groups}
+
+    # find Coaching Team ID (type "Teams")
+    coaching = fetch_groups_by_type("Teams", name="Coaching Team")
+    coaching_id = coaching[0].get("id") if coaching else None
+
     unique_people = set()
     leaders = set()
+    coaches = set()
 
+    headers = get_planning_center_headers()
+
+    # 1) loop through "Groups" memberships for people & leaders
     for gid in group_ids:
         url = f"https://api.planningcenteronline.com/groups/v2/groups/{gid}/memberships"
         params = {"filter[status]": "active", "per_page": 100}
@@ -72,48 +83,46 @@ def fetch_unique_counts(group_ids: set):
         while url:
             resp = requests.get(url, headers=headers, params=params, timeout=30)
             resp.raise_for_status()
-            body = resp.json()
+            data = resp.json()
 
-            for m in body.get("data", []):
+            for m in data.get("data", []):
                 pid = m.get("relationships", {}).get("person", {}).get("data", {}).get("id")
-                role = m.get("attributes", {}).get("role")
+                role = m.get("attributes", {}).get("role", "").lower()
                 if pid:
                     unique_people.add(pid)
                     if role == "leader":
                         leaders.add(pid)
 
-            url = body.get("links", {}).get("next")
+            url = data.get("links", {}).get("next")
             params = {}
 
-    return len(unique_people), len(leaders)
+    # 2) separately loop Coaching Team memberships for coaches
+    if coaching_id:
+        url = f"https://api.planningcenteronline.com/groups/v2/groups/{coaching_id}/memberships"
+        params = {"filter[status]": "active", "per_page": 100}
 
+        while url:
+            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
 
-def summarize_groups(group_list):
-    """
-    Compute summary metrics:
-      - number_of_groups
-      - total_groups_attendance (unique people)
-      - group_leaders (unique leaders count)
-      - coaches (set to 0 for now)
-    """
-    number_of_groups = len(group_list)
-    group_ids = {g.get("id") for g in group_list}
+            for m in data.get("data", []):
+                pid = m.get("relationships", {}).get("person", {}).get("data", {}).get("id")
+                if pid:
+                    coaches.add(pid)
 
-    # unique people and leaders count
-    unique_people_count, leaders_count = fetch_unique_counts(group_ids)
+            url = data.get("links", {}).get("next")
+            params = {}
 
     return {
-        "number_of_groups":          number_of_groups,
-        "total_groups_attendance":   unique_people_count,
-        "group_leaders":             leaders_count,
-        "coaches":                   0,
+        "number_of_groups":        number_of_groups,
+        "total_groups_attendance": len(unique_people),
+        "group_leaders":           len(leaders),
+        "coaches":                 len(coaches),
     }
 
 
 def insert_groups_summary_to_db(summary: dict, as_of_date):
-    """
-    Insert or update the groups_summary table for the given date.
-    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -122,10 +131,10 @@ def insert_groups_summary_to_db(summary: dict, as_of_date):
           (date, number_of_groups, total_groups_attendance, group_leaders, coaches)
         VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (date) DO UPDATE SET
-          number_of_groups          = EXCLUDED.number_of_groups,
-          total_groups_attendance   = EXCLUDED.total_groups_attendance,
-          group_leaders             = EXCLUDED.group_leaders,
-          coaches                   = EXCLUDED.coaches;
+          number_of_groups        = EXCLUDED.number_of_groups,
+          total_groups_attendance = EXCLUDED.total_groups_attendance,
+          group_leaders           = EXCLUDED.group_leaders,
+          coaches                 = EXCLUDED.coaches;
         """,
         (
             as_of_date,
@@ -142,19 +151,15 @@ def insert_groups_summary_to_db(summary: dict, as_of_date):
 
 @router.get("", response_model=dict)
 def generate_and_store_groups_summary():
-    """
-    Fetch filtered groups, summarize metrics, store snapshot, and return results.
-    """
-    groups = fetch_all_groups()
-    summary = summarize_groups(groups)
+    summary = summarize_groups()
     today = datetime.now().date()
     insert_groups_summary_to_db(summary, today)
     return {
-        "status":               "success",
-        "date":                 str(today),
-        "metrics":              summary,
-        "distinct_group_count": summary["number_of_groups"],
+        "status":                 "success",
+        "date":                   str(today),
+        "metrics":                summary,
+        "distinct_group_count":   summary["number_of_groups"],
         "total_groups_attendance": summary["total_groups_attendance"],
-        "group_leaders":         summary["group_leaders"],
-        "coaches":               summary["coaches"]
+        "group_leaders":           summary["group_leaders"],
+        "coaches":                 summary["coaches"],
     }
