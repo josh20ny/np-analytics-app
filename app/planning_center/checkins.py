@@ -372,6 +372,22 @@ def summarize_checkins_by_ministry(
         except Exception:
             continue
 
+        
+    # Compute totals
+    for ministry, data in summary.items():
+        breakdown = data["breakdown"]
+        # Sum all keys that match attendance_*
+        total_attendance = sum(val for k, val in breakdown.items() if k.startswith("attendance_"))
+        new_keys = [k for k in breakdown if k.startswith("new_kids_")]
+        total_new_kids = sum(breakdown[k] for k in new_keys)
+
+        if ministry == "InsideOut":
+            breakdown["total_attendance"] = total_attendance
+            breakdown["new_students"] = total_new_kids
+        else:
+            breakdown["total_attendance"] = total_attendance
+            breakdown["total_new_kids"] = total_new_kids
+
     # Build final JSON output
     return {
         "breakdown": {k: v["breakdown"] for k, v in summary.items()},
