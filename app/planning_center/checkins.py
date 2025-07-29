@@ -41,6 +41,10 @@ MINISTRY_COLUMNS = {
     ],
     "InsideOut": [
         "total_attendance", "new_students", "notes",
+        "grade_9_male", "grade_9_female",
+        "grade_10_male", "grade_10_female",
+        "grade_11_male", "grade_11_female",
+        "grade_12_male", "grade_12_female",
     ],
 }
 
@@ -182,9 +186,9 @@ def determine_service_time(dt: datetime, ministry: str) -> str | None:
     if time(15, 15) <= t <= time(17, 30):
         return "4:30 PM"
     else:  # Waumba, UpStreet, Transit
-        if time(8, 30) <= t <= time(10, 15):
+        if time(8, 00) <= t <= time(10, 15):
             return "9:30 AM"
-        if time(10, 15) <= t <= time(12, 0):
+        if time(10, 15) <= t <= time(12, 30):
             return "11:00 AM"
 
     return None  # Invalid time for this ministry
@@ -327,9 +331,16 @@ def summarize_checkins_by_ministry(
 
             summary[ministry]["counted_ids"].add(pid)
             summary[ministry]["breakdown"][f"attendance_{key}"] += 1
+            summary[ministry]["breakdown"]["total_attendance"] += 1
+
 
             if person_created.get(pid) == svc_date:
                 summary[ministry]["breakdown"][f"new_kids_{key}"] += 1
+                if ministry == "InsideOut":
+                    summary[ministry]["breakdown"]["new_students"] += 1
+                else:
+                    summary[ministry]["breakdown"]["total_new_kids"] += 1
+
 
             raw_gender = pinfo.get("gender")
             gender = raw_gender.lower() if isinstance(raw_gender, str) and raw_gender.strip() else "other"
@@ -372,21 +383,6 @@ def summarize_checkins_by_ministry(
         except Exception:
             continue
 
-        
-    # Compute totals
-    for ministry, data in summary.items():
-        breakdown = data["breakdown"]
-        # Sum all keys that match attendance_*
-        total_attendance = sum(val for k, val in breakdown.items() if k.startswith("attendance_"))
-        new_keys = [k for k in breakdown if k.startswith("new_kids_")]
-        total_new_kids = sum(breakdown[k] for k in new_keys)
-
-        if ministry == "InsideOut":
-            breakdown["total_attendance"] = total_attendance
-            breakdown["new_students"] = total_new_kids
-        else:
-            breakdown["total_attendance"] = total_attendance
-            breakdown["total_new_kids"] = total_new_kids
 
     # Build final JSON output
     return {

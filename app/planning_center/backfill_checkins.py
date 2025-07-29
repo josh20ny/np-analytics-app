@@ -22,7 +22,7 @@ def get_previous_sundays(start_date):
 
 def main():
     today = date.today()
-    most_recent_sunday = date(2025, 7, 13) #today - timedelta(days=(today.weekday() + 1) % 7)
+    most_recent_sunday = date(2025, 7, 27) #today - timedelta(days=(today.weekday() + 1) % 7)
     sundays = get_previous_sundays(most_recent_sunday)
 
     print(f"\n🚀 Starting backfill from {most_recent_sunday} to {START_DATE} ({len(sundays)} Sundays total)\n")
