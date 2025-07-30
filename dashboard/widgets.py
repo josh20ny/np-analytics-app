@@ -10,6 +10,8 @@ def overlay_years_chart(df: pd.DataFrame, title: str):
     Uses a unique key for the multiselect to avoid duplicate IDs.
     """
     st.subheader(title)
+
+    # 1) pick which years to overlay
     years = sorted(df['year'].unique())
     pick = st.multiselect(
         'Years to compare',
@@ -17,9 +19,43 @@ def overlay_years_chart(df: pd.DataFrame, title: str):
         default=years[-2:],
         key=f"years_compare_{title.replace(' ', '_')}"
     )
-    data = df.groupby(['year','week'])['value'].sum().unstack('year').fillna(0)
-    plot = data[pick]
-    st.line_chart(plot, use_container_width=True)
+    if not pick:
+        st.warning("Pick at least one year to compare.")
+        return
+
+    # 2) pivot into a year × week table
+    weekly = (
+        df
+        .groupby(['year','week'])['value']
+        .sum()
+        .unstack('year')
+        .fillna(0)
+    )
+    plot_df = weekly[pick]
+
+    # 3) ensure we have a real datetime column to map from
+    if 'parsed_date' not in df.columns:
+        df['parsed_date'] = pd.to_datetime(df['date'], format='%B %d, %Y')
+
+    # 4) build a week → date map *only* from your baseline year
+    baseline = pick[-1]
+    date_map = (
+        df[df['year'] == baseline]
+          .groupby('week')['parsed_date']
+          .max()
+    )
+
+    # 5) convert ISO week index → real datetime index
+    dt_index = date_map.reindex(plot_df.index)
+    plot_df.index = dt_index
+
+    # 6) drop any weeks without a match, then sort chronologically
+    plot_df = plot_df[~plot_df.index.isna()].sort_index()
+
+    # 7) hand it off to Streamlit (DatetimeIndex → proper time axis)
+    st.line_chart(plot_df, use_container_width=True)
+
+
 
 
 def weekly_yoy_table(df: pd.DataFrame, title: str):
@@ -133,6 +169,52 @@ def date_range_table(df: pd.DataFrame, title: str):
         st.warning("No data in selected range.")
         return
 
+    # ——— hide rows where ALL metrics are ≤ 1 ———
     display_df = filtered.drop(columns='parsed_date')
+
+    # 1) treat every column except 'date' as a metric
+    metric_cols = [c for c in display_df.columns if c != 'date']
+
+    # 2) coerce everything to numeric (None/invalid → NaN → 0)
+    metrics_num = (
+        display_df[metric_cols]
+        .apply(pd.to_numeric, errors='coerce')
+        .fillna(0)
+    )
+
+    # 3) keep only rows where at least one metric > 1
+    mask = metrics_num.gt(1).any(axis=1)
+    display_df = display_df.loc[mask]
+
+    if display_df.empty:
+        st.warning("No rows with meaningful data in selected range.")
+        return
+
     st.dataframe(display_df, use_container_width=True)
+
+
+def filter_meaningful_rows(
+    df: pd.DataFrame,
+    date_col: str = 'parsed_date',
+    min_value: float = 25.0 
+) -> pd.DataFrame:
+    """
+    Drops rows where *all* metric columns are ≤ min_value (or missing).
+    Expects `date_col` to be present, which it will drop before filtering.
+    """
+    # 1) drop the parsed date column
+    display_df = df.drop(columns=[date_col]).copy()
+
+    # 2) treat everything except the original 'date' as a metric
+    metric_cols = [c for c in display_df.columns if c != 'date']
+
+    # 3) coerce each metric to numeric (invalid → NaN → 0)
+    for col in metric_cols:
+        display_df[col] = pd.to_numeric(display_df[col], errors='coerce').fillna(0)
+
+    # 4) build mask: keep rows where any metric > min_value
+    mask = (display_df[metric_cols] > min_value).any(axis=1)
+
+    return display_df.loc[mask]
+
 
