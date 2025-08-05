@@ -438,8 +438,8 @@ async def run_checkin_summary(date: str | None = None):
 
     result = summarize_checkins_by_ministry(checkins, people, person_created, events)
     processed_count = sum(
-    sum(mini.values())
-    for mini in result["breakdown"].values()
+        breakdown_dict.get("total_attendance", 0)
+        for breakdown_dict in result["breakdown"].values()
     )
     # Optionally insert into DB, then return JSON
     for ministry, data in result["breakdown"].items():

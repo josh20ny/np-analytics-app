@@ -1,2 +1,0 @@
-[main bfa7990] Fixing the date handling of the Adult Attendance tracker so that it can handle different date formats from the adult attendance spreadsheet. And adjusting the Planning Center checkins logic so that less checkins are missed. And counting first-time kids by comparing the date of their checkin with the date of their profile creation.
- 3 files changed, 182 insertions(+), 151 deletions(-)
