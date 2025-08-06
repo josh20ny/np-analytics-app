@@ -1,11 +1,14 @@
 import requests
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, date
 from zoneinfo import ZoneInfo
 from collections import defaultdict
 import io
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from app.config import settings
-from app.db import get_conn
+from app.db import get_conn, get_db
+from sqlalchemy.orm import Session
+from app.planning_center.oauth_routes import get_pco_headers
+
 
 router = APIRouter(prefix="/planning-center/checkins", tags=["Planning Center"])
 
@@ -56,17 +59,19 @@ def get_last_sunday() -> datetime.date:
     return last_sunday.date()
 
 
-def fetch_all_checkins(date: datetime.date):
+def fetch_all_checkins(
+    date: date,
+    db: Session,
+):
     """
     Fetch all check-ins for the given date, including person and event.
     Handles pagination and returns (checkins, included).
     """
     base_url = "https://api.planningcenteronline.com/check-ins/v2/check_ins"
-    auth = (settings.PLANNING_CENTER_APP_ID, settings.PLANNING_CENTER_SECRET)
     params = {
-        "include": "person,event",
-        "where[created_at][gte]": f"{date}T00:00:00Z",
-        "where[created_at][lte]": f"{date}T23:59:59Z",
+        "include":                   "person,event",
+        "where[created_at][gte]":    f"{date}T00:00:00Z",
+        "where[created_at][lte]":    f"{date}T23:59:59Z",
     }
 
     checkins = []
@@ -76,29 +81,22 @@ def fetch_all_checkins(date: datetime.date):
 
     try:
         while url:
+            # for the first page pass params, after that rely on the next-link
             if first:
-                resp = requests.get(
-                    url,
-                    auth=auth,
-                    headers={"Accept": "application/json"},
-                    params=params,
-                    timeout=15
-                )
+                resp = requests.get(url, headers=get_pco_headers(db), params=params, timeout=15)
                 first = False
             else:
-                resp = requests.get(
-                    url,
-                    auth=auth,
-                    headers={"Accept": "application/json"},
-                    timeout=15
-                )
+                resp = requests.get(url, headers=get_pco_headers(db), timeout=15)
+
             resp.raise_for_status()
             data = resp.json()
+
             checkins.extend(data.get("data", []))
             included.extend(data.get("included", []))
             url = data.get("links", {}).get("next")
+
     except Exception as e:
-        raise HTTPException(502, f"PCO fetch failed: {e}")
+        raise HTTPException(status_code=502, detail=f"PCO fetch failed: {e}")
 
     return checkins, included
 
@@ -423,7 +421,10 @@ def insert_summary_into_db(ministry: str, data: dict):
 
 
 @router.get("", response_model=dict)
-async def run_checkin_summary(date: str | None = None):
+async def run_checkin_summary(
+    date: str | None = None,
+    db: Session = Depends(get_db),
+    ):
     if date:
         as_date = datetime.fromisoformat(date).date()
     else:
@@ -431,7 +432,7 @@ async def run_checkin_summary(date: str | None = None):
         now = datetime.now(tz=ZoneInfo("America/Chicago"))
         as_date = (now - timedelta(days=(now.weekday() + 1) % 7)).date()
 
-    checkins, included = fetch_all_checkins(as_date)
+    checkins, included = fetch_all_checkins(as_date, db)
     people = parse_people_data(included)
     person_created = parse_person_created_dates(included)
     events = parse_event_data(included)

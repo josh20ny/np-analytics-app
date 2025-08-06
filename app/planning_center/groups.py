@@ -1,8 +1,10 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 import requests, base64
 from app.config import settings
-from app.db import get_conn
+from app.db import get_conn, get_db
 from datetime import datetime
+from sqlalchemy.orm import Session
+from app.planning_center.oauth_routes import get_pco_headers
 
 router = APIRouter(prefix="/planning-center/groups", tags=["Planning Center"])
 
@@ -19,11 +21,11 @@ def get_planning_center_headers():
     }
 
 
-def fetch_groups_by_type(type_name: str, name: str = None) -> list:
+def fetch_groups_by_type(type_name: str, db: Session, name: str = None) -> list:
     """
     Fetch all active groups of a given GroupType name. Optionally filter by group name.
     """
-    headers = get_planning_center_headers()
+    headers = get_pco_headers(db)
     url = "https://api.planningcenteronline.com/groups/v2/groups"
     params = {"include[]": "group_type", "per_page": 100}
     results = []
@@ -56,24 +58,24 @@ def fetch_groups_by_type(type_name: str, name: str = None) -> list:
     return results
 
 
-def summarize_groups():
+def summarize_groups(db: Session):
     """
     Fetches group and membership data to compute metrics in a single pass.
     """
     # fetch all active "Groups" groups
-    groups = fetch_groups_by_type("Groups")
+    groups = fetch_groups_by_type("Groups", db, None)
     number_of_groups = len(groups)
     group_ids = {g.get("id") for g in groups}
 
     # find Coaching Team ID (type "Teams")
-    coaching = fetch_groups_by_type("Teams", name="Coaching Team")
+    coaching = fetch_groups_by_type("Teams", db=db, name="Coaching Team")
     coaching_id = coaching[0].get("id") if coaching else None
 
     unique_people = set()
     leaders = set()
     coaches = set()
 
-    headers = get_planning_center_headers()
+    headers = get_pco_headers(db)
 
     # 1) loop through "Groups" memberships for people & leaders
     for gid in group_ids:
@@ -150,8 +152,8 @@ def insert_groups_summary_to_db(summary: dict, as_of_date):
 
 
 @router.get("", response_model=dict)
-def generate_and_store_groups_summary():
-    summary = summarize_groups()
+def generate_and_store_groups_summary(db: Session = Depends(get_db)):
+    summary = summarize_groups(db)
     today = datetime.now().date()
     insert_groups_summary_to_db(summary, today)
     return {
