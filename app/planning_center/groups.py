@@ -26,7 +26,7 @@ def fetch_groups_by_type(type_name: str, db: Session, name: str = None) -> list:
     Fetch all active groups of a given GroupType name. Optionally filter by group name.
     """
     headers = get_pco_headers(db)
-    url = "https://api.planningcenteronline.com/groups/v2/groups"
+    url = f"{settings.PLANNING_CENTER_BASE_URL}/groups/v2/groups"
     params = {"include[]": "group_type", "per_page": 100}
     results = []
     group_types = {}
@@ -79,7 +79,7 @@ def summarize_groups(db: Session):
 
     # 1) loop through "Groups" memberships for people & leaders
     for gid in group_ids:
-        url = f"https://api.planningcenteronline.com/groups/v2/groups/{gid}/memberships"
+        url = f"{settings.PLANNING_CENTER_BASE_URL}/groups/v2/groups/{gid}/memberships"
         params = {"filter[status]": "active", "per_page": 100}
 
         while url:
@@ -100,7 +100,7 @@ def summarize_groups(db: Session):
 
     # 2) separately loop Coaching Team memberships for coaches
     if coaching_id:
-        url = f"https://api.planningcenteronline.com/groups/v2/groups/{coaching_id}/memberships"
+        url = f"{settings.PLANNING_CENTER_BASE_URL}/groups/v2/groups/{coaching_id}/memberships"
         params = {"filter[status]": "active", "per_page": 100}
 
         while url:

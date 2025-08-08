@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     # ─── Planning Center ───────────────────────────────────────────────────────
     PLANNING_CENTER_APP_ID: str
     PLANNING_CENTER_SECRET: str
+    PLANNING_CENTER_BASE_URL: str = "https://api.planningcenteronline.com"
+    GENERAL_GIVING_FUND_ID: str
 
     # ─── YouTube ────────────────────────────────────────────────────────────────
     YOUTUBE_API_KEY: str

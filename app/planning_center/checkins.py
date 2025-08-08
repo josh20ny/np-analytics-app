@@ -67,7 +67,7 @@ def fetch_all_checkins(
     Fetch all check-ins for the given date, including person and event.
     Handles pagination and returns (checkins, included).
     """
-    base_url = "https://api.planningcenteronline.com/check-ins/v2/check_ins"
+    base_url = f"{settings.PLANNING_CENTER_BASE_URL}/check-ins/v2/check_ins"
     params = {
         "include":                   "person,event",
         "where[created_at][gte]":    f"{date}T00:00:00Z",

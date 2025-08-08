@@ -22,6 +22,7 @@ JOBS = [
     ("/mailchimp/weekly-summary", "Mailchimp weekly summary"),
     ("/planning-center/groups", "Planning Center Groups"),
     ("/planning-center/checkins", "Planning Center check-ins"),
+    ("/planning-center/giving/weekly-summary", "Planning Center Giving Summary"),
 ]
 
 
