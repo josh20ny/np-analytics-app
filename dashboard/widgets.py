@@ -75,8 +75,9 @@ def weekly_yoy_table(df: pd.DataFrame, title: str):
     weekly = df.groupby(['week','year'])['value'].sum().unstack('year').fillna(0)
     comp = weekly[[last, now]].copy()
     # Compute YoY percentage
-    comp['YoY %'] = (comp[now] - comp[last]) / comp[last] * 100
+    comp['YoY %'] = (comp[now] - comp[last]).div(comp[last].replace(0, pd.NA)).mul(100)
 
+    dates = df[df['year'] == now].groupby('week')['date'].max()
     # Map ISO week to the actual most recent date in current year
     dates = df[df['year'] == now].groupby('week')['date'].max()
     # Reset index to bring week into column, map to dates, parse dates
@@ -193,28 +194,29 @@ def date_range_table(df: pd.DataFrame, title: str):
     st.dataframe(display_df, use_container_width=True)
 
 
-def filter_meaningful_rows(
-    df: pd.DataFrame,
-    date_col: str = 'parsed_date',
-    min_value: float = 25.0 
-) -> pd.DataFrame:
+def filter_meaningful_rows(df: pd.DataFrame, metric_col: str | None = None, min_value: float = 1):
     """
-    Drops rows where *all* metric columns are ≤ min_value (or missing).
-    Expects `date_col` to be present, which it will drop before filtering.
+    Return df with only rows where metric_col >= min_value.
+    Only the metric column is coerced to numeric; all other columns keep their original dtype.
+    If metric_col is None, we try to infer a sensible one.
     """
-    # 1) drop the parsed date column
-    display_df = df.drop(columns=[date_col]).copy()
+    df = df.copy()
 
-    # 2) treat everything except the original 'date' as a metric
-    metric_cols = [c for c in display_df.columns if c != 'date']
+    # Try to infer if not provided
+    if metric_col is None:
+        for c in ["total_attendance", "value", "total_giving", "giving_units"]:
+            if c in df.columns:
+                metric_col = c
+                break
 
-    # 3) coerce each metric to numeric (invalid → NaN → 0)
-    for col in metric_cols:
-        display_df[col] = pd.to_numeric(display_df[col], errors='coerce').fillna(0)
+    # If we still don't have a metric col, just return as-is
+    if not metric_col or metric_col not in df.columns:
+        return df
 
-    # 4) build mask: keep rows where any metric > min_value
-    mask = (display_df[metric_cols] > min_value).any(axis=1)
+    # Coerce ONLY the metric column
+    df[metric_col] = pd.to_numeric(df[metric_col], errors="coerce")
 
-    return display_df.loc[mask]
+    # Filter by threshold (treat NaN as 0)
+    return df[df[metric_col].fillna(0) >= min_value]
 
 

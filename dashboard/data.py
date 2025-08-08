@@ -22,13 +22,14 @@ def load_table(table_name: str, date_col: str, value_col: str) -> pd.DataFrame:
         parse_dates=[date_col]
     )
     df = df.sort_values(date_col)
-    # extract year & week for plotting
+    
+    if value_col is not None and value_col in df.columns:
+        df[value_col] = pd.to_numeric(df[value_col], errors='coerce').fillna(0)
+
     df['year'] = df[date_col].dt.year
     df['week'] = df[date_col].dt.isocalendar().week
-    # rename and isolate
     df = df[[date_col, value_col, 'year', 'week']].rename(
         columns={date_col: 'date', value_col: 'value'}
     )
-    # format the date for display (Month dd, yyyy)
     df['date'] = pd.to_datetime(df['date']).dt.strftime('%B %d, %Y')
     return df
