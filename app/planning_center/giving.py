@@ -29,6 +29,9 @@ log = logging.getLogger(__name__)
 REQUEST_TIMEOUT_S = 30
 MAX_PER_PAGE = 100
 
+# Use documented JSON:API "where[received_at][...]" range filters
+DATE_FIELD = "received_at"  # change to "completed_at" or "created_at" if you prefer
+
 # "gross" (default): sum of General designations only
 # "net": subtract proportional fee share from the General portion
 DEFAULT_TOTAL_MODE = getattr(settings, "GIVING_TOTAL_MODE", "gross").lower()
@@ -65,16 +68,6 @@ def _requests_session() -> requests.Session:
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     return s
-
-
-def _parse_iso_date(iso_ts: str) -> date | None:
-    if not iso_ts:
-        return None
-    try:
-        # PCO returns Zulu timestamps; we only need the date part for windowing
-        return date.fromisoformat(iso_ts.split("T")[0])
-    except Exception:
-        return None
 
 
 def _extract_general_designation_cents(
@@ -117,26 +110,37 @@ def fetch_giving_data(
     debug: bool = False,
 ) -> Tuple[int, int, Dict]:
     """
-    Pull donations received in [week_start, week_end] that *touch* the General fund,
-    and compute:
-      - total_cents (gross by default, optionally net if mode="net")
-      - unique donor count (person relationship present) with positive activity
+    Pull donations that *touch* the General fund within [week_start, week_end], inclusive,
+    using JSON:API date-time range filters:
+
+      where[received_at][gte] = week_startT00:00:00Z
+      where[received_at][lt]  = (week_end + 1 day)T00:00:00Z
+
+    Returns:
+      total_cents, giving_units, debug_info
     """
     headers = get_pco_headers(db)
     base_url = f"{_base_url()}/giving/v2/donations"
     fund_id = _general_fund_id_str()
     session = _requests_session()
 
+    # Build documented date filters (closed-open interval)
+    start_iso = f"{week_start.isoformat()}T00:00:00Z"
+    next_day_iso = f"{(week_end + timedelta(days=1)).isoformat()}T00:00:00Z"
+
     params = {
-        "filter[fund_id]": fund_id,  # only donations that include General in any designation
-        "filter[succeeded]": "true",  # exclude failed/pending/declined
-        # exact window; PCO applies org timezone for received filters
-        "filter[received_since]": week_start.isoformat(),
-        "filter[received_before]": (week_end + timedelta(days=1)).isoformat(),
+        "filter[fund_id]": fund_id,    # only donations that include General in any designation
+        "filter[succeeded]": "true",   # succeeded only
+
+        # ✅ JSON:API date range (no undocumented params)
+        f"where[{DATE_FIELD}][gte]": start_iso,
+        f"where[{DATE_FIELD}][lt]":  next_day_iso,
+
         "per_page": MAX_PER_PAGE,
-        "sort": "-received_at",  # newest first so we can early-stop
+        "sort": f"-{DATE_FIELD}",
+
         # keep payloads lean
-        "fields[donations]": "amount_cents,received_at,fee_cents,fee_covered,refunded,payment_status",
+        "fields[donations]": "amount_cents,received_at,completed_at,created_at,fee_cents,fee_covered,refunded,payment_status",
         "fields[designations]": "amount_cents",
         "include": "person,designations,designations.fund",
     }
@@ -145,7 +149,6 @@ def fetch_giving_data(
     dbg = {
         "seen": 0,
         "kept": 0,
-        "skipped_outside_window": 0,
         "skipped_unsuccessful": 0,
         "skipped_refunded_now": 0,
         "skipped_no_general_designation": 0,
@@ -158,17 +161,16 @@ def fetch_giving_data(
 
     url = base_url
     page = 1
-    keep_paging = True
     t0 = time.perf_counter()
 
-    while url and keep_paging:
+    while url:
         if debug:
             log.info("[giving] ▶ page=%s GET %s", page, url)
 
         r = session.get(
             url,
             headers=headers,
-            params=params if page == 1 else None,
+            params=params if page == 1 else None,  # only pass params on first page
             timeout=REQUEST_TIMEOUT_S,
         )
         if r.status_code != 200:
@@ -182,24 +184,11 @@ def fetch_giving_data(
         for item in items:
             dbg["seen"] += 1
             attrs = (item.get("attributes") or {})
-            rec_at = _parse_iso_date(attrs.get("received_at"))
-            if not rec_at:
-                continue
 
-            # early stop once we drop below the window (because sort=-received_at)
-            if rec_at < week_start:
-                keep_paging = False
-                break
-            if rec_at > week_end:
-                dbg["skipped_outside_window"] += 1
-                continue
-
-            # safety: skip anything not marked succeeded
+            # safety: skip anything not marked succeeded or marked refunded
             if attrs.get("payment_status") and attrs.get("payment_status") != "succeeded":
                 dbg["skipped_unsuccessful"] += 1
                 continue
-
-            # safety: skip rows already marked refunded (UI excludes them from received totals)
             if attrs.get("refunded"):
                 dbg["skipped_refunded_now"] += 1
                 continue
@@ -231,7 +220,7 @@ def fetch_giving_data(
 
             dbg["kept"] += 1
 
-        url = (payload.get("links") or {}).get("next") if keep_paging else None
+        url = (payload.get("links") or {}).get("next")
         page += 1
 
     dbg["pages"] = page - 1
@@ -290,7 +279,8 @@ def insert_giving_summary_to_db(
 @router.get("/weekly-summary")
 def weekly_summary(
     debug: bool = Query(False),
-    mode: str = Query(DEFAULT_TOTAL_MODE, regex="^(gross|net)$", description='Total mode: "gross" or "net"'),
+    # Pydantic v2 uses "pattern" instead of "regex"
+    mode: str = Query(DEFAULT_TOTAL_MODE, pattern="^(gross|net)$", description='Total mode: "gross" or "net"'),
     start: str | None = Query(None, description="Override week_start (YYYY-MM-DD)"),
     end: str | None = Query(None, description="Override week_end (YYYY-MM-DD)"),
     db: Session = Depends(get_db),
@@ -326,6 +316,7 @@ def weekly_summary(
         "total_giving": float(total_amount),
         "giving_units": units,
         "mode": mode,
+        "date_field": DATE_FIELD,
     }
     if debug:
         result["debug"] = dbg
