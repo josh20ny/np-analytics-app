@@ -119,6 +119,7 @@ def call_tool_function(function_name: str, args: dict) -> str:
         "getUpstreetAttendance": "UpStreetAttendance",
         "getWaumbaLandAttendance": "WaumbaLandAttendance",
         "getWeeklyYouTubeSummary": "WeeklyYouTubeSummary",
+        "getWeeklyGivingSummary":    "WeeklyGivingSummary",
     }
 
     if function_name in table_tools:

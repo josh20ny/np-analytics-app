@@ -20,6 +20,7 @@ TABLES = {
     "UpStreetAttendance":   ("upstreet_attendance",      "date"),
     "WaumbaLandAttendance": ("waumbaland_attendance",    "date"),
     "WeeklyYouTubeSummary": ("weekly_youtube_summary",   "week_end"),
+    "WeeklyGivingSummary":  ("weekly_giving_summary",    "week_end"),
 }
 
 engine = create_engine(DATABASE_URL)
