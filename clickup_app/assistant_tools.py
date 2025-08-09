@@ -6,8 +6,7 @@ from dateutil.relativedelta import relativedelta
 from datetime import timedelta, date
 from sqlalchemy.sql import text
 import calendar
-
-from weekly_summary.config import DATABASE_URL
+from app.config import settings
 
 # ── 1) TABLES mapping ──────────────────────────────────────────────────────────
 TABLES = {
@@ -22,6 +21,8 @@ TABLES = {
     "WeeklyYouTubeSummary": ("weekly_youtube_summary",   "week_end"),
     "WeeklyGivingSummary":  ("weekly_giving_summary",    "week_end"),
 }
+
+DATABASE_URL = settings.DATABASE_URL
 
 engine = create_engine(DATABASE_URL)
 
@@ -123,6 +124,3 @@ def compare_adult_attendance(year1: int, year2: int, month: int) -> dict[str, in
         results[f"{y}"] = total
     return results
 
-# ── 2) Formatting & report builder ──────────────────────────────────────────────
-from weekly_summary.formatter       import format_summary       # :contentReference[oaicite:5]{index=5}
-from weekly_summary.report_builder import build_full_report    # :contentReference[oaicite:6]{index=6}

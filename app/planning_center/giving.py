@@ -8,16 +8,12 @@ from decimal import Decimal
 from datetime import date, timedelta
 from typing import Dict, Tuple
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
 from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_conn, get_db
-from app.google_sheets import get_previous_week_dates
+from app.utils.common import get_previous_week_dates_cst, paginate_next_links  # helpers
 from app.planning_center.oauth_routes import get_pco_headers
 
 router = APIRouter(prefix="/planning-center/giving", tags=["Planning Center"])
@@ -26,7 +22,6 @@ log = logging.getLogger(__name__)
 # ---------------------------
 # Tunables
 # ---------------------------
-REQUEST_TIMEOUT_S = 30
 MAX_PER_PAGE = 100
 
 # Use documented JSON:API "where[received_at][...]" range filters
@@ -52,27 +47,7 @@ def _general_fund_id_str() -> str:
     return str(fid)
 
 
-def _requests_session() -> requests.Session:
-    """Session with retry/backoff for 429/5xx, connection pooling."""
-    retry = Retry(
-        total=6,
-        read=6,
-        connect=4,
-        backoff_factor=0.6,               # ~0.6, 1.2, 2.4, ...
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=("GET",),
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=8, pool_maxsize=16)
-    s = requests.Session()
-    s.mount("https://", adapter)
-    s.mount("http://", adapter)
-    return s
-
-
-def _extract_general_designation_cents(
-    item: dict, inc: dict, fund_id: str
-) -> int:
+def _extract_general_designation_cents(item: dict, inc: dict, fund_id: str) -> int:
     """Sum designation amounts (in cents) that target the General fund."""
     rels = (item.get("relationships") or {})
     d_refs = ((rels.get("designations") or {}).get("data") or [])
@@ -122,7 +97,6 @@ def fetch_giving_data(
     headers = get_pco_headers(db)
     base_url = f"{_base_url()}/giving/v2/donations"
     fund_id = _general_fund_id_str()
-    session = _requests_session()
 
     # Build documented date filters (closed-open interval)
     start_iso = f"{week_start.isoformat()}T00:00:00Z"
@@ -159,71 +133,60 @@ def fetch_giving_data(
     total_general_cents = 0
     donor_net: Dict[str, int] = {}
 
-    url = base_url
-    page = 1
+    page_num = 0
     t0 = time.perf_counter()
 
-    while url:
-        if debug:
-            log.info("[giving] ▶ page=%s GET %s", page, url)
+    try:
+        for page in paginate_next_links(base_url, headers=headers, params=params):
+            page_num += 1
+            items = page.get("data") or []
+            included = page.get("included") or []
+            inc = {(i.get("type"), i.get("id")): i for i in included}
 
-        r = session.get(
-            url,
-            headers=headers,
-            params=params if page == 1 else None,  # only pass params on first page
-            timeout=REQUEST_TIMEOUT_S,
-        )
-        if r.status_code != 200:
-            raise HTTPException(status_code=r.status_code, detail=f"Error fetching giving data: {r.text}")
+            for item in items:
+                dbg["seen"] += 1
+                attrs = (item.get("attributes") or {})
 
-        payload = r.json() or {}
-        items = payload.get("data") or []
-        included = payload.get("included") or []
-        inc = {(i.get("type"), i.get("id")): i for i in included}
+                # safety: skip anything not marked succeeded or marked refunded
+                if attrs.get("payment_status") and attrs.get("payment_status") != "succeeded":
+                    dbg["skipped_unsuccessful"] += 1
+                    continue
+                if attrs.get("refunded"):
+                    dbg["skipped_refunded_now"] += 1
+                    continue
 
-        for item in items:
-            dbg["seen"] += 1
-            attrs = (item.get("attributes") or {})
+                # compute the General slice for this donation
+                gen_cents = _extract_general_designation_cents(item, inc, fund_id)
+                if gen_cents <= 0:
+                    dbg["skipped_no_general_designation"] += 1
+                    continue
 
-            # safety: skip anything not marked succeeded or marked refunded
-            if attrs.get("payment_status") and attrs.get("payment_status") != "succeeded":
-                dbg["skipped_unsuccessful"] += 1
-                continue
-            if attrs.get("refunded"):
-                dbg["skipped_refunded_now"] += 1
-                continue
+                # accumulate gross General
+                total_general_cents += gen_cents
 
-            # compute the General slice for this donation
-            gen_cents = _extract_general_designation_cents(item, inc, fund_id)
-            if gen_cents <= 0:
-                dbg["skipped_no_general_designation"] += 1
-                continue
+                # compute donor "net for unit count" depending on mode
+                donation_total = int(attrs.get("amount_cents") or 0)
+                donation_fee = abs(int(attrs.get("fee_cents") or 0))
+                fee_covered = bool(attrs.get("fee_covered"))
+                net_cents = gen_cents
+                if mode == "net":
+                    fee_share = _fee_share_for_general(donation_total, donation_fee, fee_covered, gen_cents)
+                    dbg["fee_share_cents"] += fee_share
+                    net_cents = max(gen_cents - fee_share, 0)
 
-            # accumulate gross General
-            total_general_cents += gen_cents
+                # donor id
+                person = ((item.get("relationships") or {}).get("person") or {}).get("data") or {}
+                pid = person.get("id")
+                if pid:
+                    donor_net[pid] = donor_net.get(pid, 0) + net_cents
 
-            # compute donor "net for unit count" depending on mode
-            donation_total = int(attrs.get("amount_cents") or 0)
-            donation_fee = abs(int(attrs.get("fee_cents") or 0))
-            fee_covered = bool(attrs.get("fee_covered"))
-            net_cents = gen_cents
-            if mode == "net":
-                fee_share = _fee_share_for_general(donation_total, donation_fee, fee_covered, gen_cents)
-                dbg["fee_share_cents"] += fee_share
-                net_cents = max(gen_cents - fee_share, 0)
+                dbg["kept"] += 1
 
-            # donor id
-            person = ((item.get("relationships") or {}).get("person") or {}).get("data") or {}
-            pid = person.get("id")
-            if pid:
-                donor_net[pid] = donor_net.get(pid, 0) + net_cents
+    except Exception as e:
+        # Surface a readable error instead of a generic 500
+        raise HTTPException(status_code=502, detail=f"PCO donations fetch failed: {e}")
 
-            dbg["kept"] += 1
-
-        url = (payload.get("links") or {}).get("next")
-        page += 1
-
-    dbg["pages"] = page - 1
+    dbg["pages"] = page_num
     if debug:
         log.info(
             "[giving] fetched week donations in %.2fs over %s pages",
@@ -244,7 +207,7 @@ def fetch_giving_data(
 
     # Return cents according to mode: gross (default) or net
     if mode == "net":
-        # We already subtracted fees into donor_net; recompute the matching total from those
+        # recompute the matching total from donor_net
         total_cents = sum(donor_net.values())
     else:
         total_cents = total_general_cents
@@ -279,15 +242,14 @@ def insert_giving_summary_to_db(
 @router.get("/weekly-summary")
 def weekly_summary(
     debug: bool = Query(False),
-    # Pydantic v2 uses "pattern" instead of "regex"
     mode: str = Query(DEFAULT_TOTAL_MODE, pattern="^(gross|net)$", description='Total mode: "gross" or "net"'),
     start: str | None = Query(None, description="Override week_start (YYYY-MM-DD)"),
     end: str | None = Query(None, description="Override week_end (YYYY-MM-DD)"),
     db: Session = Depends(get_db),
 ):
     """
-    Returns weekly giving totals for the *General* fund.
-    - Default is the previous full Mon→Sun week derived by `get_previous_week_dates()`.
+    Returns weekly giving totals for the *General* fund (settings.GENERAL_GIVING_FUND_ID).
+    - Default is the previous full Mon→Sun week (CST) via `get_previous_week_dates_cst()`.
     - `mode=gross` (default) sums General-designated amounts.
     - `mode=net` subtracts a proportional fee share from the General slice.
     """
@@ -295,7 +257,7 @@ def weekly_summary(
         week_start = date.fromisoformat(start)
         week_end = date.fromisoformat(end)
     else:
-        raw_start, raw_end = get_previous_week_dates()
+        raw_start, raw_end = get_previous_week_dates_cst()
         week_start = date.fromisoformat(raw_start)
         week_end = date.fromisoformat(raw_end)
 

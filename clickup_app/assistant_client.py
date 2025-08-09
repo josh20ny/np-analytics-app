@@ -9,8 +9,6 @@ from clickup_app.assistant_tools import (
     fetch_records_for_range,
     aggregate_total_attendance,
     compare_adult_attendance,
-    format_summary,
-    build_full_report,
 )
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -101,12 +99,6 @@ def call_tool_function(function_name: str, args: dict) -> str:
         )
         return json.dumps(result)
 
-    # Generic summary functions
-    if function_name == "getCheckinsSummary":
-        return format_summary(latest)
-    if function_name == "getMailchimpSummary":
-        rows = fetch_all_mailchimp_rows_for_latest_week()
-        return format_summary(latest, rows)
 
     # Table-based queries
     table_tools = {

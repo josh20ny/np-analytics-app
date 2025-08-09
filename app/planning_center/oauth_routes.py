@@ -23,7 +23,7 @@ def start_auth():
         "client_id":     settings.PLANNING_CENTER_APP_ID,
         "redirect_uri":  settings.API_BASE_URL + "/planning-center/oauth/callback",
         "response_type": "code",
-        "scope":         "calendar check-ins giving groups people services",
+        "scope":         "calendar check_ins giving groups people services",
     }
     url = "https://api.planningcenteronline.com/oauth/authorize?" + urlencode(params)
     return RedirectResponse(url)
@@ -90,5 +90,6 @@ def get_pco_headers(db: Session) -> dict:
 
     return {
         "Authorization": f"Bearer {token_row.access_token}",
-        "Accept":        "application/json",
+        "Accept": "application/vnd.api+json",
     }
+

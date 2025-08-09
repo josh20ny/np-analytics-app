@@ -11,7 +11,7 @@ from clickup_app.assistant_client import run_assistant_with_tools
 load_dotenv()
 
 # Configuration
-BASE_URL = os.getenv("BASE_URL", "https://np-analytics-app.onrender.com")
+BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000") #os.getenv("BASE_URL", "https://np-analytics-app.onrender.com")
 WAKEUP_DELAY = int(os.getenv("WAKEUP_DELAY", "10"))
 
 # List of API endpoints to call and their labels
@@ -69,7 +69,7 @@ def main():
 
     # Prompt the Assistant
     prompt = (
-        "Can you turn this JSON data into a nice summary of this week's data?"
+        "Can you turn this JSON data into a nice summary of this week's data? I want a particular emphasis on giving data, Adult Attendance data, and then also a good summary of each ministry."
         f"\n\n{report}"
     )
     summary = run_assistant_with_tools(prompt)

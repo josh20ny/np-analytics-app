@@ -1,21 +1,23 @@
 from fastapi import APIRouter
 from .models import AttendanceInput
 from .db import get_conn
-from .google_sheets import process_adult_attendance_from_sheet
+from .utils.common import compute_adult_attendance_metrics
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
 @router.get("/process-sheet")
 def process_sheet():
+    # left as-is; google_sheets handles it
+    from .google_sheets import process_adult_attendance_from_sheet
     return process_adult_attendance_from_sheet()
 
 @router.post("/adults")
 def submit_adults(data: AttendanceInput):
-    total = data.attendance_930 + data.attendance_1100
-    pc_930 = (data.attendance_930 / data.chair_count) * 100 if data.chair_count else 0
-    pc_1100 = (data.attendance_1100 / data.chair_count) * 100 if data.chair_count else 0
-    pd_930 = (data.attendance_930 / total) * 100 if total else 0
-    pd_1100 = (data.attendance_1100 / total) * 100 if total else 0
+    m = compute_adult_attendance_metrics(
+        chair_count=data.chair_count,
+        a930=data.attendance_930,
+        a1100=data.attendance_1100,
+    )
 
     conn = get_conn()
     cur = conn.cursor()
@@ -42,15 +44,15 @@ def submit_adults(data: AttendanceInput):
             data.chair_count,
             data.attendance_930,
             data.attendance_1100,
-            round(pc_930, 2),
-            round(pc_1100, 2),
-            round(pd_930, 2),
-            round(pd_1100, 2),
-            total
+            m.pc_930,
+            m.pc_1100,
+            m.pd_930,
+            m.pd_1100,
+            m.total,
         )
     )
     conn.commit()
     cur.close()
     conn.close()
 
-    return {"status": "success", "date": data.date, "total_attendance": total}
+    return {"status": "success", "date": data.date, "total_attendance": m.total}

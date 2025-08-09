@@ -1,120 +1,115 @@
+# app/planning_center/groups.py
+from __future__ import annotations
+
 from fastapi import APIRouter, Depends
-import requests, base64
+from sqlalchemy.orm import Session
+from datetime import datetime
+from typing import Dict, List, Optional, Set
+
 from app.config import settings
 from app.db import get_conn, get_db
-from datetime import datetime
-from sqlalchemy.orm import Session
+from app.utils.common import paginate_next_links
 from app.planning_center.oauth_routes import get_pco_headers
 
 router = APIRouter(prefix="/planning-center/groups", tags=["Planning Center"])
 
-
-def get_planning_center_headers():
-    """
-    Build headers for Basic auth using App ID & Secret.
-    """
-    auth = f"{settings.PLANNING_CENTER_APP_ID}:{settings.PLANNING_CENTER_SECRET}"
-    token = base64.b64encode(auth.encode()).decode()
-    return {
-        "Authorization": f"Basic {token}",
-        "Accept":        "application/vnd.api+json",
-    }
+PCO_BASE = f"{settings.PLANNING_CENTER_BASE_URL}"
 
 
-def fetch_groups_by_type(type_name: str, db: Session, name: str = None) -> list:
+def fetch_groups_by_type(type_name: str, db: Session, name: Optional[str] = None) -> List[dict]:
     """
-    Fetch all active groups of a given GroupType name. Optionally filter by group name.
+    Fetch all active groups of a given GroupType name. Optionally filter by exact group name.
+    Uses shared pagination helper.
     """
     headers = get_pco_headers(db)
-    url = f"{settings.PLANNING_CENTER_BASE_URL}/groups/v2/groups"
-    params = {"include[]": "group_type", "per_page": 100}
-    results = []
-    group_types = {}
+    url = f"{PCO_BASE}/groups/v2/groups"
 
-    while url:
-        resp = requests.get(url, headers=headers, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
+    # Keep the same include semantics you had before
+    params: Dict[str, str | int] = {"include[]": "group_type", "per_page": 100}
 
-        # build type lookup
-        for inc in data.get("included", []):
+    results: List[dict] = []
+    group_types: Dict[str, str] = {}  # GroupType ID -> GroupType name
+
+    for page in paginate_next_links(url, headers=headers, params=params):
+        # Build/extend type lookup
+        for inc in page.get("included", []) or []:
             if inc.get("type") == "GroupType":
-                group_types[inc["id"]] = inc.get("attributes", {}).get("name", "")
+                group_types[inc["id"]] = (inc.get("attributes") or {}).get("name", "") or ""
 
-        # filter by type (and name if provided)
-        for g in data.get("data", []):
-            attrs = g.get("attributes", {})
-            rel = g.get("relationships", {}).get("group_type", {}).get("data")
+        # Filter by type (and exact name, if provided)
+        for g in page.get("data", []) or []:
+            attrs = g.get("attributes") or {}
+            rel = (g.get("relationships") or {}).get("group_type", {}).get("data")
             if attrs.get("archived_at") is None and rel:
                 if group_types.get(rel.get("id")) == type_name:
                     if not name or attrs.get("name") == name:
                         results.append(g)
                         if name:
-                            return results
+                            return results  # early exit if we asked for a single, exact group
 
-        url = data.get("links", {}).get("next")
-        params = {"include[]": "group_type"}
+        # After first iteration, paginate_next_links follows the "next" link itself (no need to change params)
 
     return results
 
 
-def summarize_groups(db: Session):
+def summarize_groups(db: Session) -> Dict[str, int]:
     """
     Fetches group and membership data to compute metrics in a single pass.
+    Logic preserved:
+      - number_of_groups = count of active 'Groups' type
+      - total_groups_attendance = unique people in all 'Groups' memberships (active)
+      - group_leaders = unique leaders in 'Groups'
+      - coaches = unique people in "Coaching Team" (type 'Teams')
     """
-    # fetch all active "Groups" groups
+    # 1) Fetch all active "Groups" groups
     groups = fetch_groups_by_type("Groups", db, None)
     number_of_groups = len(groups)
-    group_ids = {g.get("id") for g in groups}
+    group_ids: Set[str] = {g.get("id") for g in groups if g.get("id")}
 
-    # find Coaching Team ID (type "Teams")
+    # 2) Find Coaching Team ID (type "Teams")
     coaching = fetch_groups_by_type("Teams", db=db, name="Coaching Team")
     coaching_id = coaching[0].get("id") if coaching else None
 
-    unique_people = set()
-    leaders = set()
-    coaches = set()
+    unique_people: Set[str] = set()
+    leaders: Set[str] = set()
+    coaches: Set[str] = set()
 
     headers = get_pco_headers(db)
 
-    # 1) loop through "Groups" memberships for people & leaders
+    # 3) Loop through "Groups" memberships for people & leaders (active only)
     for gid in group_ids:
-        url = f"{settings.PLANNING_CENTER_BASE_URL}/groups/v2/groups/{gid}/memberships"
+        url = f"{PCO_BASE}/groups/v2/groups/{gid}/memberships"
         params = {"filter[status]": "active", "per_page": 100}
 
-        while url:
-            resp = requests.get(url, headers=headers, params=params, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-
-            for m in data.get("data", []):
-                pid = m.get("relationships", {}).get("person", {}).get("data", {}).get("id")
-                role = m.get("attributes", {}).get("role", "").lower()
+        for page in paginate_next_links(url, headers=headers, params=params):
+            for m in page.get("data", []) or []:
+                pid = (
+                    (m.get("relationships") or {})
+                    .get("person", {})
+                    .get("data", {})
+                    .get("id")
+                )
+                role = ((m.get("attributes") or {}).get("role") or "").lower()
                 if pid:
                     unique_people.add(pid)
                     if role == "leader":
                         leaders.add(pid)
 
-            url = data.get("links", {}).get("next")
-            params = {}
-
-    # 2) separately loop Coaching Team memberships for coaches
+    # 4) Separately loop Coaching Team memberships for coaches (active only)
     if coaching_id:
-        url = f"{settings.PLANNING_CENTER_BASE_URL}/groups/v2/groups/{coaching_id}/memberships"
+        url = f"{PCO_BASE}/groups/v2/groups/{coaching_id}/memberships"
         params = {"filter[status]": "active", "per_page": 100}
 
-        while url:
-            resp = requests.get(url, headers=headers, params=params, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-
-            for m in data.get("data", []):
-                pid = m.get("relationships", {}).get("person", {}).get("data", {}).get("id")
+        for page in paginate_next_links(url, headers=headers, params=params):
+            for m in page.get("data", []) or []:
+                pid = (
+                    (m.get("relationships") or {})
+                    .get("person", {})
+                    .get("data", {})
+                    .get("id")
+                )
                 if pid:
                     coaches.add(pid)
-
-            url = data.get("links", {}).get("next")
-            params = {}
 
     return {
         "number_of_groups":        number_of_groups,
@@ -127,28 +122,30 @@ def summarize_groups(db: Session):
 def insert_groups_summary_to_db(summary: dict, as_of_date):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO groups_summary
-          (date, number_of_groups, total_groups_attendance, group_leaders, coaches)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (date) DO UPDATE SET
-          number_of_groups        = EXCLUDED.number_of_groups,
-          total_groups_attendance = EXCLUDED.total_groups_attendance,
-          group_leaders           = EXCLUDED.group_leaders,
-          coaches                 = EXCLUDED.coaches;
-        """,
-        (
-            as_of_date,
-            summary["number_of_groups"],
-            summary["total_groups_attendance"],
-            summary["group_leaders"],
-            summary["coaches"],
+    try:
+        cur.execute(
+            """
+            INSERT INTO groups_summary
+              (date, number_of_groups, total_groups_attendance, group_leaders, coaches)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (date) DO UPDATE SET
+              number_of_groups        = EXCLUDED.number_of_groups,
+              total_groups_attendance = EXCLUDED.total_groups_attendance,
+              group_leaders           = EXCLUDED.group_leaders,
+              coaches                 = EXCLUDED.coaches;
+            """,
+            (
+                as_of_date,
+                summary["number_of_groups"],
+                summary["total_groups_attendance"],
+                summary["group_leaders"],
+                summary["coaches"],
+            ),
         )
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
 
 
 @router.get("", response_model=dict)
@@ -157,10 +154,10 @@ def generate_and_store_groups_summary(db: Session = Depends(get_db)):
     today = datetime.now().date()
     insert_groups_summary_to_db(summary, today)
     return {
-        "status":                 "success",
-        "date":                   str(today),
-        "metrics":                summary,
-        "distinct_group_count":   summary["number_of_groups"],
+        "status":                  "success",
+        "date":                    str(today),
+        "metrics":                 summary,
+        "distinct_group_count":    summary["number_of_groups"],
         "total_groups_attendance": summary["total_groups_attendance"],
         "group_leaders":           summary["group_leaders"],
         "coaches":                 summary["coaches"],
