@@ -11,7 +11,7 @@ from clickup_app.assistant_client import run_assistant_with_tools
 load_dotenv()
 
 # Configuration
-BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000") #os.getenv("BASE_URL", "https://np-analytics-app.onrender.com")
+BASE_URL = os.getenv("BASE_URL", "https://np-analytics-app.onrender.com") #os.getenv("BASE_URL", "http://127.0.0.1:8000") #
 WAKEUP_DELAY = int(os.getenv("WAKEUP_DELAY", "10"))
 
 # List of API endpoints to call and their labels
