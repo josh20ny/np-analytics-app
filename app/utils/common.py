@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 import time
 import math
 import requests
+import logging
+from dateutil.parser import parse as dt_parse
 if TYPE_CHECKING:
     # type-only import so runtime doesn't require it yet
     from app.models import AdultAttendanceMetrics
@@ -48,21 +50,47 @@ def excel_serial_to_date(n: float | int) -> date:
     # Excel/Sheets “day zero” offset
     return (datetime(1899, 12, 30) + timedelta(days=int(n))).date()
 
-def parse_sheet_date(raw: Any) -> Optional[date]:
-    """Accepts ISO string or Excel serial; returns date or None."""
-    if raw is None:
+
+def parse_sheet_date(cell) -> date | None:
+    """
+    Accepts:
+      - Google/Excel serial dates (e.g., 45500)
+      - Strings in many formats (e.g., '2025-08-10', '8/10/2025', 'Aug 10, 2025')
+      - datetime/date objects
+    Returns a date (no timezone).
+    """
+    if cell is None or str(cell).strip() == "":
         return None
-    if isinstance(raw, (int, float)):
-        return excel_serial_to_date(raw)
+
+    # If it already is a date/datetime
+    if isinstance(cell, datetime):
+        return cell.date()
+    if isinstance(cell, date):
+        return cell
+
+    s = str(cell).strip()
+
+    # Try ISO first
     try:
-        # Fast path for YYYY-MM-DD
-        if isinstance(raw, str) and len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
-            y, m, d = raw.split("-")
-            return date(int(y), int(m), int(d))
-        # Fallback: very light parser without bringing in dateutil
-        return datetime.fromisoformat(str(raw)).date()
+        return datetime.fromisoformat(s).date()
+    except Exception:
+        pass
+
+    # Try common US-style strings (we’re in Texas): month/day/year bias
+    try:
+        return dt_parse(s, dayfirst=False, yearfirst=False, fuzzy=True).date()
+    except Exception:
+        pass
+
+    # Try Google Sheets/Excel serial (numbers or numeric strings)
+    try:
+        # Sheets/Excel epoch is 1899-12-30 (Excel’s 1900 leap-year bug accounted for)
+        serial = int(float(s))
+        base = date(1899, 12, 30)
+        return base + timedelta(days=serial)
     except Exception:
         return None
+
 
 # ─────────────────────────────
 # Math / display helpers
@@ -105,17 +133,42 @@ def request_json(method: str, url: str, *, headers=None, params=None, json_body=
             time.sleep(backoff * (2 ** attempt))
             attempt += 1
 
-def paginate_next_links(url: str, *, headers=None, params=None, timeout: int = 30) -> Generator[Dict[str, Any], None, None]:
+log = logging.getLogger(__name__)
+
+def paginate_next_links(
+    url: str, *, headers=None, params=None, timeout: int = 30,
+    max_pages: int = 10000, detect_loops: bool = True
+) -> Generator[Dict[str, Any], None, None]:
     """
     Yield successive JSON pages for APIs that provide `links.next` (e.g., Planning Center).
     First call passes `params`, subsequent calls rely on the `next` URL.
     """
     first = True
+    pages = 0
+    seen: set[str] = set()
+
     while url:
+        if detect_loops and url in seen:
+            log.warning("[paginate] detected URL loop; breaking. url=%s", url)
+            break
+        seen.add(url)
+
         data = request_json("GET", url, headers=headers, params=(params if first else None), timeout=timeout)
         yield data
-        url = (data.get("links") or {}).get("next")
+
+        next_url = (data.get("links") or {}).get("next")
+        if not next_url:
+            break
+        if detect_loops and next_url == url:
+            log.warning("[paginate] next==current; breaking to avoid infinite loop. url=%s", url)
+            break
+
+        url = next_url
         first = False
+        pages += 1
+        if pages >= max_pages:
+            log.warning("[paginate] reached max_pages=%s; stopping.", max_pages)
+            break
 
 # ─────────────────────────────
 # Mailchimp auth helper (Basic)

@@ -1,11 +1,10 @@
 # app/planning_center/giving.py
-
 from __future__ import annotations
 
 import logging
 import time
 from decimal import Decimal
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, time as dtime, timezone
 from typing import Dict, Tuple
 
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -13,7 +12,11 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_conn, get_db
-from app.utils.common import get_previous_week_dates_cst, paginate_next_links  # helpers
+from app.utils.common import (
+    CENTRAL_TZ,
+    get_previous_week_dates_cst,
+    paginate_next_links,
+)
 from app.planning_center.oauth_routes import get_pco_headers
 
 router = APIRouter(prefix="/planning-center/giving", tags=["Planning Center"])
@@ -24,11 +27,11 @@ log = logging.getLogger(__name__)
 # ---------------------------
 MAX_PER_PAGE = 100
 
-# Use documented JSON:API "where[received_at][...]" range filters
-DATE_FIELD = "received_at"  # change to "completed_at" or "created_at" if you prefer
+# JSON:API date field to filter on (PCO UI commonly uses received_at)
+DATE_FIELD = "received_at"  # could be "completed_at" if you prefer
 
-# "gross" (default): sum of General designations only
-# "net": subtract proportional fee share from the General portion
+# "gross" (default): sum General-fund designations
+# "net": subtract proportional fee share from the General slice
 DEFAULT_TOTAL_MODE = getattr(settings, "GIVING_TOTAL_MODE", "gross").lower()
 
 
@@ -38,6 +41,38 @@ def _base_url() -> str:
         "PLANNING_CENTER_BASE_URL",
         "https://api.planningcenteronline.com",
     ).rstrip("/")
+
+
+def upsert_f_giving_person_week(rows: list[tuple]) -> int:
+    """
+    rows: (person_id, week_start, week_end, amount_cents_gross, amount_cents_net, gift_count, campus_id)
+    Conflict key: (person_id, week_end)
+    """
+    if not rows:
+        return 0
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.executemany(
+            """
+            INSERT INTO f_giving_person_week
+              (person_id, week_start, week_end, amount_cents_gross, amount_cents_net, gift_count, campus_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (person_id, week_end) DO UPDATE SET
+              week_start = EXCLUDED.week_start,
+              amount_cents_gross = EXCLUDED.amount_cents_gross,
+              amount_cents_net   = EXCLUDED.amount_cents_net,
+              gift_count         = EXCLUDED.gift_count,
+              campus_id          = COALESCE(f_giving_person_week.campus_id, EXCLUDED.campus_id)
+            """,
+            rows
+        )
+        n = cur.rowcount
+        conn.commit()
+        return n
+    finally:
+        cur.close()
+        conn.close()
 
 
 def _general_fund_id_str() -> str:
@@ -76,6 +111,18 @@ def _fee_share_for_general(
     return (donation_fee_cents * general_cents) // donation_total_cents
 
 
+def _week_boundaries_to_utc_iso(week_start: date, week_end: date) -> Tuple[str, str]:
+    """
+    Convert CST week [Mon..Sun] to UTC closed-open ISO boundaries for JSON:API:
+      [week_startT00:00:00 CST, week_end+1 T00:00:00 CST) -> 'Z' ISO strings
+    """
+    start_local = datetime.combine(week_start, dtime(0, 0), tzinfo=CENTRAL_TZ)
+    end_local = datetime.combine(week_end + timedelta(days=1), dtime(0, 0), tzinfo=CENTRAL_TZ)
+    start_iso = start_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    end_iso = end_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return start_iso, end_iso
+
+
 def fetch_giving_data(
     week_start: date,
     week_end: date,
@@ -85,41 +132,37 @@ def fetch_giving_data(
     debug: bool = False,
 ) -> Tuple[int, int, Dict]:
     """
-    Pull donations that *touch* the General fund within [week_start, week_end], inclusive,
-    using JSON:API date-time range filters:
-
-      where[received_at][gte] = week_startT00:00:00Z
-      where[received_at][lt]  = (week_end + 1 day)T00:00:00Z
+    Pull donations that touch the General fund within [week_start, week_end] (CST Mon..Sun),
+    using JSON:API UTC ISO boundaries derived from CST midnights.
 
     Returns:
       total_cents, giving_units, debug_info
+
+    Side effect:
+      upserts per-person weekly rows into f_giving_person_week (gross/net/count).
     """
     headers = get_pco_headers(db)
     base_url = f"{_base_url()}/giving/v2/donations"
     fund_id = _general_fund_id_str()
 
-    # Build documented date filters (closed-open interval)
-    start_iso = f"{week_start.isoformat()}T00:00:00Z"
-    next_day_iso = f"{(week_end + timedelta(days=1)).isoformat()}T00:00:00Z"
+    # Build CST → UTC boundaries for the whole week
+    start_iso, next_day_iso = _week_boundaries_to_utc_iso(week_start, week_end)
 
     params = {
-        "filter[fund_id]": fund_id,    # only donations that include General in any designation
-        "filter[succeeded]": "true",   # succeeded only
-
-        # ✅ JSON:API date range (no undocumented params)
+        # Local-accurate window (converted to UTC)
         f"where[{DATE_FIELD}][gte]": start_iso,
         f"where[{DATE_FIELD}][lt]":  next_day_iso,
 
         "per_page": MAX_PER_PAGE,
         "sort": f"-{DATE_FIELD}",
 
-        # keep payloads lean
+        # lean payloads
         "fields[donations]": "amount_cents,received_at,completed_at,created_at,fee_cents,fee_covered,refunded,payment_status",
-        "fields[designations]": "amount_cents",
+        "fields[designations]": "amount_cents,fund_id",
         "include": "person,designations,designations.fund",
     }
+    # NOTE: no 'filter[fund_id]' and no 'filter[succeeded]'; we enforce those in code to match the UI.
 
-    # Debug counters (returned only when debug=True)
     dbg = {
         "seen": 0,
         "kept": 0,
@@ -131,7 +174,11 @@ def fetch_giving_data(
     }
 
     total_general_cents = 0
-    donor_net: Dict[str, int] = {}
+
+    # per-person weekly rollups (General slice)
+    per_person_gross: Dict[str, int] = {}
+    per_person_net:   Dict[str, int] = {}
+    per_person_count: Dict[str, int] = {}
 
     page_num = 0
     t0 = time.perf_counter()
@@ -147,70 +194,73 @@ def fetch_giving_data(
                 dbg["seen"] += 1
                 attrs = (item.get("attributes") or {})
 
-                # safety: skip anything not marked succeeded or marked refunded
-                if attrs.get("payment_status") and attrs.get("payment_status") != "succeeded":
-                    dbg["skipped_unsuccessful"] += 1
-                    continue
+                # Skip failed/voided/refunded (UI shows "+ failed/refunded" separately)
                 if attrs.get("refunded"):
                     dbg["skipped_refunded_now"] += 1
                     continue
+                status = (attrs.get("payment_status") or "").lower()
+                if status in ("failed", "voided", "refunded"):
+                    dbg["skipped_unsuccessful"] += 1
+                    continue
 
-                # compute the General slice for this donation
+                # General slice for this donation (donation may have multiple funds)
                 gen_cents = _extract_general_designation_cents(item, inc, fund_id)
                 if gen_cents <= 0:
                     dbg["skipped_no_general_designation"] += 1
                     continue
 
-                # accumulate gross General
+                # Accumulate gross General
                 total_general_cents += gen_cents
 
-                # compute donor "net for unit count" depending on mode
+                # Proportional fee share → net
                 donation_total = int(attrs.get("amount_cents") or 0)
-                donation_fee = abs(int(attrs.get("fee_cents") or 0))
-                fee_covered = bool(attrs.get("fee_covered"))
-                net_cents = gen_cents
-                if mode == "net":
-                    fee_share = _fee_share_for_general(donation_total, donation_fee, fee_covered, gen_cents)
-                    dbg["fee_share_cents"] += fee_share
-                    net_cents = max(gen_cents - fee_share, 0)
+                donation_fee   = abs(int(attrs.get("fee_cents") or 0))
+                fee_covered    = bool(attrs.get("fee_covered"))
+                fee_share      = _fee_share_for_general(donation_total, donation_fee, fee_covered, gen_cents)
+                dbg["fee_share_cents"] += fee_share
+                net_cents = max(gen_cents - fee_share, 0)
 
-                # donor id
+                # Donor person (may be missing)
                 person = ((item.get("relationships") or {}).get("person") or {}).get("data") or {}
                 pid = person.get("id")
                 if pid:
-                    donor_net[pid] = donor_net.get(pid, 0) + net_cents
+                    per_person_gross[pid] = per_person_gross.get(pid, 0) + gen_cents
+                    # when mode="gross" we still store net as the *net of the donation* (for completeness)
+                    per_person_net[pid]   = per_person_net.get(pid, 0) + (net_cents if mode == "net" else gen_cents)
+                    per_person_count[pid] = per_person_count.get(pid, 0) + 1
 
                 dbg["kept"] += 1
 
     except Exception as e:
-        # Surface a readable error instead of a generic 500
         raise HTTPException(status_code=502, detail=f"PCO donations fetch failed: {e}")
 
     dbg["pages"] = page_num
     if debug:
-        log.info(
-            "[giving] fetched week donations in %.2fs over %s pages",
-            time.perf_counter() - t0,
-            dbg["pages"],
-        )
+        dbg["donors_count_keys"] = len(per_person_count)
+        dbg["gifts_with_person_sum"] = sum(per_person_count.values())
+        log.info("[giving] fetched week donations in %.2fs over %s pages", time.perf_counter() - t0, dbg["pages"])
         log.info(
             "[giving][debug] totals: %s",
-            {
-                "total_general_cents": total_general_cents,
-                "fee_share_cents": dbg["fee_share_cents"],
-                "donors_with_activity": len(donor_net),
-            },
+            {"total_general_cents": total_general_cents, "fee_share_cents": dbg["fee_share_cents"], "donors_with_activity": len(per_person_count)},
         )
 
-    # Unique donors with positive activity for the week
-    giving_units = sum(1 for v in donor_net.values() if v > 0)
+    # Build and upsert the per-person weekly rows
+    rows = []
+    for pid in per_person_count.keys():
+        gross = per_person_gross.get(pid, 0)
+        # if mode=gross, we still keep net column equal to gross for now (you can switch later)
+        net = per_person_net.get(pid, 0) if mode == "net" else gross
+        cnt   = per_person_count.get(pid, 0)
+        rows.append((pid, week_start, week_end, gross, net, cnt, None))  # campus_id=None (single campus)
 
-    # Return cents according to mode: gross (default) or net
-    if mode == "net":
-        # recompute the matching total from donor_net
-        total_cents = sum(donor_net.values())
-    else:
-        total_cents = total_general_cents
+    affected = upsert_f_giving_person_week(rows)
+    log.info("[giving] f_giving_person_week upserted=%s for week_end=%s (donors=%s)", affected, week_end, len(rows))
+
+    # Unique donors with positive activity (General slice > 0)
+    giving_units = len(per_person_count)
+
+    # Weekly total to return
+    total_cents = (sum(per_person_net.values()) if mode == "net" else total_general_cents)
 
     return total_cents, giving_units, dbg
 
@@ -249,9 +299,11 @@ def weekly_summary(
 ):
     """
     Returns weekly giving totals for the *General* fund (settings.GENERAL_GIVING_FUND_ID).
-    - Default is the previous full Mon→Sun week (CST) via `get_previous_week_dates_cst()`.
-    - `mode=gross` (default) sums General-designated amounts.
-    - `mode=net` subtracts a proportional fee share from the General slice.
+    - Default = previous full Mon→Sun (CST) via get_previous_week_dates_cst().
+    - mode=gross (default) sums General-designated amounts.
+    - mode=net subtracts proportional fee share from the General slice.
+
+    Side effect: upserts per-person rows to f_giving_person_week for this week.
     """
     if start and end:
         week_start = date.fromisoformat(start)
@@ -262,10 +314,9 @@ def weekly_summary(
         week_end = date.fromisoformat(raw_end)
 
     total_cents, units, dbg = fetch_giving_data(week_start, week_end, db, mode=mode, debug=debug)
-
     total_amount = Decimal(total_cents) / Decimal(100)
 
-    # Save, but don’t break the API if persistence fails
+    # Save (do not fail API if persistence errors)
     try:
         insert_giving_summary_to_db(week_start, week_end, total_amount, units)
     except Exception as e:

@@ -11,6 +11,7 @@ from app.planning_center.checkins import router as pc_checkins_router
 from app.planning_center.groups import router as pc_groups_router
 from app.planning_center.giving import router as pc_giving_router
 from app.planning_center.oauth_routes import router as pco_oauth_router
+from app.planning_center.people import router as people_router
 
 # ClickUp app
 from clickup_app.webhooks import router as clickup_webhooks_router
@@ -21,6 +22,21 @@ from app.youtube.routes import router as youtube_router
 
 # (Optional) other routers if you have them:
 # from app.assistant.routes import router as assistant_router
+
+import logging, sys
+
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+root = logging.getLogger()
+if not root.handlers:  # avoid double handlers when reloader is on
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    root.addHandler(handler)
+
+root.setLevel(logging.INFO)
+logging.getLogger("uvicorn.error").setLevel(logging.INFO)
+logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+
 
 app = FastAPI(title="NP Analytics", version="1.0.0")
 
@@ -40,6 +56,7 @@ app.include_router(pc_checkins_router)
 app.include_router(pc_groups_router)
 app.include_router(pc_giving_router)
 app.include_router(pco_oauth_router)
+app.include_router(people_router)
 
 # ClickUp
 app.include_router(clickup_webhooks_router)
