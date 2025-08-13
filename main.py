@@ -12,10 +12,14 @@ from app.planning_center.groups import router as pc_groups_router
 from app.planning_center.giving import router as pc_giving_router
 from app.planning_center.oauth_routes import router as pco_oauth_router
 from app.planning_center.people import router as people_router
+from app.cadence import router as cadence_router
+
+
 
 # ClickUp app
 from clickup_app.webhooks import router as clickup_webhooks_router
 from clickup_app.oauth_routes import router as cu_oauth_router
+
 
 # YouTube
 from app.youtube.routes import router as youtube_router
@@ -57,6 +61,7 @@ app.include_router(pc_groups_router)
 app.include_router(pc_giving_router)
 app.include_router(pco_oauth_router)
 app.include_router(people_router)
+app.include_router(cadence_router)
 
 # ClickUp
 app.include_router(clickup_webhooks_router)
