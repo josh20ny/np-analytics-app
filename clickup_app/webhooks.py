@@ -1,15 +1,15 @@
 # clickup_app/webhooks.py
-from fastapi import APIRouter, Request, Depends, BackgroundTasks
+
+from fastapi import APIRouter, Request, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 from app.db import get_db
-from clickup_app.clickup_client import ClickUpService
-from clickup_app.assistant_client import run_assistant_with_tools
+
 from clickup_app.clickup_client import post_message
+from clickup_app.assistant_client import run_assistant_with_tools
 
 import os
 
 router = APIRouter()
-service = ClickUpService()
 
 @router.post("/webhooks/clickup/chat")
 async def receive_clickup_automation(
@@ -17,31 +17,30 @@ async def receive_clickup_automation(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    payload   = await request.json()
-    data      = payload.get("payload", {}).get("data", {})
-    content   = data.get("text_content", "")
-    channel_id = data.get("parent") or data.get("channel_id")
-    user_id   = data.get("userid")
-    ws_id     = payload.get("team_id") or os.getenv("CLICKUP_WORKSPACE_ID")
+    body = await request.json()
 
-    # Only respond when the bot is mentioned
+    payload = body.get("payload", {}) or {}
+    data = payload.get("data", {}) or {}
+
+    # Message content + routing info
+    content    = (data.get("text_content") or data.get("content") or "").strip()
+    channel_id = data.get("parent") or data.get("channel_id")
+    user_id    = data.get("userid") or (data.get("user") or {}).get("id")
+    workspace_id = body.get("team_id") or os.getenv("CLICKUP_WORKSPACE_ID")
+
+    # Only respond if bot is mentioned
     if not content or not channel_id or "@NP Analytics Bot" not in content:
         return {"status": "ignored"}
 
     prompt = content.replace("@NP Analytics Bot", "").strip()
 
-    def handle_response():
-        try:
-            reply = run_assistant_with_tools(prompt)
-            mention = f"<@{user_id}>" if user_id else ""
-            full = f"{mention} {reply}".strip()
+    def handle():
+        # Run your assistant, then @-mention the author and post back in same channel
+        reply   = run_assistant_with_tools(prompt)
+        mention = f"<@{user_id}>" if user_id else ""
+        message = f"{mention} {reply}".strip()
+        post_message(db, workspace_id, channel_id, message)
 
-            # ✅ Send with OAuth workspace token, to the same channel
-            post_message(db, ws_id, channel_id, full)
-
-            print("✅ Message posted to ClickUp (OAuth)")
-        except Exception as e:
-            print(f"❌ Error posting to ClickUp: {e}")
-
-    background_tasks.add_task(handle_response)
+    background_tasks.add_task(handle)
     return {"status": "accepted"}
+
