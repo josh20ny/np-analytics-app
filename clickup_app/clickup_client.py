@@ -11,42 +11,44 @@ from clickup_app.crud import get_token, create_or_update_token
 TOKEN_URL = "https://api.clickup.com/api/v2/oauth/token"
 API_BASE  = "https://api.clickup.com/api/v3"
 
-def get_access_token(db: Session, workspace_id: str) -> str:
-    """
-    Return a valid access_token for the given workspace.
-    Refresh if expired or within 60 seconds of expiring.
-    """
+def get_access_token(db, workspace_id: str) -> str:
     token_row = get_token(db, workspace_id)
     if not token_row:
         raise RuntimeError(f"No ClickUp OAuth token found for workspace {workspace_id}")
 
-    # Refresh if expired or will expire within 60s
     now = datetime.utcnow()
-    if token_row.expires_at is None or token_row.expires_at <= now + timedelta(seconds=60):
-        resp = requests.post(
-            TOKEN_URL,
-            json={
+    # Refresh only if actually expired (or exactly at expiry)
+    if token_row.expires_at is None or token_row.expires_at <= now:
+        try:
+            # ✅ Use form-encoded body (not JSON)
+            form = {
                 "client_id":     CLIENT_ID,
                 "client_secret": CLIENT_SECRET,
                 "grant_type":    "refresh_token",
                 "refresh_token": token_row.refresh_token,
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+            }
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}
+            resp = requests.post(TOKEN_URL, data=form, headers=headers, timeout=30)
+            # If ClickUp returns an error JSON, raise for clearer logs
+            if resp.status_code >= 400:
+                try:
+                    print(f"[clickup] refresh failed {resp.status_code}: {resp.text}")
+                finally:
+                    resp.raise_for_status()
 
-        # Upsert with new values and recomputed expires_at
-        token_row = create_or_update_token(
-            db=db,
-            workspace_id=workspace_id,
-            access_token=data["access_token"],
-            refresh_token=data.get("refresh_token", token_row.refresh_token),
-            expires_in=int(data.get("expires_in", 3600)),
-        )
+            data = resp.json()
+            token_row = create_or_update_token(
+                db=db,
+                workspace_id=workspace_id,
+                access_token=data["access_token"],
+                refresh_token=data.get("refresh_token", token_row.refresh_token),
+                expires_in=int(data.get("expires_in", 3600)),
+            )
+        except Exception as e:
+            # Bubble up with context so you can see it in Render logs
+            raise RuntimeError(f"ClickUp token refresh failed: {e}") from e
 
-    # ClickUp expects the raw token in the Authorization header (no "Bearer ")
-    return token_row.access_token
+    return token_row.access_token  # raw token for v3 Chat APIs
 
 def post_message(
     db: Session,

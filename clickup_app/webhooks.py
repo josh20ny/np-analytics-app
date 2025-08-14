@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from datetime import datetime
 from pytz import timezone
+import re
 
 from clickup_app.assistant_client import run_assistant_with_tools
 from clickup_app.clickup_client import post_message, get_channel_members_map, format_user_mention
@@ -56,21 +57,24 @@ async def receive_clickup_automation(
 
         background_tasks.add_task(handle)
         return {"status": "accepted"}
-    elif "ou" in content:
+    elif re.search(r"\bOU\b", content, flags=re.IGNORECASE):
         now = datetime.now(timezone('America/Chicago'))
-        reply = f"I have deteceted OU in your message.\n The time is {now.strftime("%I:%M %p")} and OU still sucks! 🤘🐂"
+        reply = (
+            "I have detected OU in your message.\n"
+            f"The time is {now.strftime('%I:%M %p')} and OU still sucks! 🤘🐂"
+        )
+
+        display_name = None  # ✅ default before try
         try:
             members_map = get_channel_members_map(db, workspace_id, channel_id)
             display_name = members_map.get(user_id)
         except Exception as e:
             print(f"[clickup] members lookup failed: {e}")
 
-        mention = format_user_mention(user_id, display_name)
+        mention = format_user_mention(user_id, display_name)  # safe even if None
         message = f"{mention} {reply}".strip()
-
         post_message(db, workspace_id, channel_id, message)
+        return {"status": "ok"}
 
     else:
         return {"status": "ignored"}
-
-
