@@ -215,7 +215,11 @@ def _fetch_giving_events(
     """
     Returns person_id -> [week_end dates with gift_count > 0] within a rolling window.
     """
-    window_start = as_of - timedelta(days=rolling_days)
+    if as_of is None:
+        as_of = get_last_sunday_cst()
+
+    # inclusive rolling window ending at `as_of`
+    window_start = as_of - timedelta(days=rolling_days - 1)
     effective_start = max(filter(None, [since, window_start]))
 
     conn = get_conn(); cur = conn.cursor()
@@ -225,14 +229,15 @@ def _fetch_giving_events(
             SELECT person_id, week_end
             FROM f_giving_person_week
             WHERE gift_count > 0
-              AND week_end >= %s
+              AND week_end >= %(start)s
+              AND week_end <= %(as_of)s
             ORDER BY person_id, week_end;
             """,
-            (effective_start,)
+            {"start": effective_start, "as_of": as_of}
         )
         out: Dict[str, List[date]] = defaultdict(list)
         for pid, wk_end in cur.fetchall():
-            out[pid].append(wk_end)
+            out[str(pid)].append(wk_end)
         return out
     finally:
         cur.close(); conn.close()
@@ -359,37 +364,21 @@ def rebuild_person_cadence(
     since: Optional[date] = None,
     signals: Iterable[str] = ("give","attend","group"),
     rolling_days: int = DEFAULT_ROLLING_DAYS,
+    as_of: Optional[date] = None,   # ⬅️ add
 ) -> Dict[str, int]:
-    """Rebuild cadence for selected signals using a rolling window (default 180 days)."""
-    as_of = get_last_sunday_cst()
+    as_of = as_of or get_last_sunday_cst()   # ⬅️ use override when provided
     totals = {"give": 0, "attend": 0, "group": 0}
 
     if "give" in signals:
         give_events = _fetch_giving_events(db, since, as_of=as_of, rolling_days=rolling_days)
+        assert isinstance(give_events, dict), f"giving fetch returned {type(give_events)}"
         rows = _build_rows_for_signal(give_events, "give", as_of)
         totals["give"] = upsert_person_cadence(rows)
-        log.info("[cadence] give upserted=%s people=%s (window=%sd)", totals["give"], len(give_events), rolling_days)
+
 
     if "attend" in signals:
-        # Use IO-excluding kid check-ins (Waumba, UpStreet, Transit) to infer adult attendance.
-        # Respect the same rolling window you pass to other signals.
-        window_start = as_of - timedelta(days=rolling_days)
-
-        # Pull raw occurrences as (person_id, svc_date)
-        occ_rows = _iter_attendance_occurrences(db, since=window_start)
-
-        # Group into {person_id: [dates...]} within the window
-        per_person_dates: dict[str, list[date]] = defaultdict(list)
-        for pid, svc_dt in occ_rows:
-            if window_start <= svc_dt <= as_of:
-                per_person_dates[pid].append(svc_dt)
-
-        # De-dup and sort each person’s dates (some families may have multiple kid check-ins same day)
-        attend_events = {pid: sorted(set(dts)) for pid, dts in per_person_dates.items()}
-
-        # Reuse your existing builder (expects {person_id: [dates...]})
+        attend_events = _fetch_adult_attendance_events(since, as_of=as_of, rolling_days=rolling_days)
         rows = _build_rows_for_signal(attend_events, "attend", as_of)
-
         totals["attend"] = upsert_person_cadence(rows)
         log.info(
             "[cadence] attend upserted=%s people=%s (window=%sd, IO excluded)",
@@ -505,8 +494,16 @@ def _attended_adults_for_week(week_start: date, week_end: date) -> Dict[str, int
 def _group_active_for_week(week_end: date) -> Dict[str, bool]:
     return _fetch_group_active_asof(week_end)
 
-def build_weekly_snapshot(db: Session, week_end: Optional[date] = None) -> Dict[str, int]:
+def build_weekly_snapshot(db: Session, *, week_end: date, ensure_cadence: bool = True):
     """ Build snap_person_week for a target week (default: last Sunday CST). """
+    if ensure_cadence:
+        # Only do this if the caller hasn't already rebuilt cadence
+        rebuild_person_cadence(
+            db, signals=("give","attend"),  # skip group for speed
+            rolling_days=DEFAULT_ROLLING_DAYS,
+            as_of=week_end,
+        )
+
     if not week_end:
         week_end = get_last_sunday_cst()
     week_start, wk_end = week_bounds_for(week_end)
@@ -991,11 +988,6 @@ def _count_total_lapsed_people(lapse_threshold: int = 3) -> int:
 
 
 def _fetch_newly_lapsed_aggregate(week_end: date) -> tuple[int, dict, list]:
-    """
-    Aggregate *newly* lapsed people for the given week_end from lapse_events.
-    Returns: (unique_people_total, by_signal_counts, items[])
-    items[] = [{ person_id, name, email, lapsed: [{signal,bucket,expected_by,observed_none_since,missed_cycles}] }]
-    """
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute(
@@ -1005,8 +997,10 @@ def _fetch_newly_lapsed_aggregate(week_end: date) -> tuple[int, dict, list]:
                    p.first_name, p.last_name, p.email
             FROM lapse_events e
             JOIN pco_people p ON p.person_id = e.person_id
-            LEFT JOIN person_cadence pc ON pc.person_id = e.person_id AND pc.signal = e.signal
+            LEFT JOIN person_cadence pc
+              ON pc.person_id = e.person_id AND pc.signal = e.signal
             WHERE e.week_flagged = %s
+              AND e.missed_cycles = 3         -- ⬅️ only first week hitting threshold
             ORDER BY p.last_name, p.first_name, e.signal
             """,
             (week_end,),
@@ -1037,6 +1031,7 @@ def _fetch_newly_lapsed_aggregate(week_end: date) -> tuple[int, dict, list]:
 
     items = list(per_person.values())
     return len(items), by_signal, items
+
 
 
 def _fetch_newly_no_longer_attends(week_end: date, inactivity_days: int = 180) -> list[dict]:
@@ -1243,11 +1238,11 @@ def build_weekly_report(
     assert wk_end == week_end
 
     # 1) Rebuild cadences (rolling window; group is status-based)
-    rebuild_person_cadence(db, signals=("give","attend","group"), rolling_days=rolling_days)
+    rebuild_person_cadence(db, signals=("give","attend","group"), rolling_days=rolling_days,)
 
     # 2) Ensure snapshot
     if ensure_snapshot:
-        build_weekly_snapshot(db, week_end=week_end)
+        build_weekly_snapshot(db, week_end=week_end, ensure_cadence=False)
 
     # 3) Buckets (exclude lapsed)
     buckets = {
@@ -1285,17 +1280,16 @@ def build_weekly_report(
     }
 
     # 6) Lapses & no-longer-attends
-    #    First: write/refresh lapse events & dropouts for this week (side-effects in DB)
-    detect_and_write_lapses_for_week(
+    payload = detect_and_write_lapses_for_week(
         week_end,
         signals=("attend","give","serve"),
         inactivity_days_for_drop=180,
     )
+    all_lapsed_by_signal = payload.get("all_lapsed_counts", {})
 
-    #    Then: shape the response the way you want
+    # Then shape the response
     new_lapsed_total_people, new_lapsed_by_signal, newly_lapsed_items = _fetch_newly_lapsed_aggregate(week_end)
     total_lapsed_people = _count_total_lapsed_people(lapse_threshold=3)
-
     nla_added_items = _fetch_newly_no_longer_attends(week_end, inactivity_days=180)
 
 
@@ -1314,11 +1308,11 @@ def build_weekly_report(
                 "first_time_serving":  fd_counts[3],
             },
             "lapses": {
-                # show only “newly lapsed this week” + a total rollup
-                "new_this_week_total": new_lapsed_total_people,   # unique people newly lapsed this week
-                "new_by_signal": new_lapsed_by_signal,            # e.g. {"attend": 118, "give": 9, "serve": 0}
-                "total_lapsed_people": total_lapsed_people,       # unique people currently lapsed in any signal
-                "items": newly_lapsed_items,                      # ONLY those newly lapsed this week (detailed)
+                "new_this_week_total": new_lapsed_total_people,
+                "new_by_signal": new_lapsed_by_signal,
+                "total_lapsed_people": total_lapsed_people,
+                "all_lapsed_by_signal": all_lapsed_by_signal,  # ⬅️ now included
+                "items": newly_lapsed_items,  # only missed_cycles == 3
             },
             "no_longer_attends": {
                 # show only “added this week” and their details
@@ -1329,7 +1323,7 @@ def build_weekly_report(
             "notes": [
                 "Cadences computed over a rolling 180-day window; low samples (<4) => irregular.",
                 "Attendance lapses count only if Engaged tier == 0 AND household still has a child <14 (InsideOut excluded).",
-                "Lapsed = missed >= 3 cycles; items list only the newly lapsed this week.",
+                "Lapsed = missed >= 3 cycles; items list shows only those hitting 3 missed cycles this week.",
                 "“No longer attends” = no engagement for 180 days; list shows only those added this week.",
                 "Serving cadence/buckets will populate once serving signals are wired.",
             ],
@@ -1499,6 +1493,93 @@ def api_person_cadence(person_id: str, days: int = Query(180, ge=30, le=730)):
         "person": {"person_id": person_id, "name": f"{first} {last}".strip(), "email": email},
         "cadence": cad,
         "events": {"attendance_dates": attend_dates, "giving_weeks": giving_weeks},
+    }
+
+@router.api_route("/reset", methods=["GET","POST"], response_model=dict)
+def api_reset_cadence(
+    confirm: str = Query(..., description="Must equal 'RESET-CADENCE'"),
+    backfill: bool = Query(False, description="If true, (re)build multiple weeks"),
+    signals: str = Query("give,attend,group", description="Comma list: give,attend,group"),
+    start_date: Optional[date] = Query(None, description="YYYY-MM-DD; first Sunday on/after this date"),
+    end_date: Optional[date] = Query(None, description="YYYY-MM-DD; last Sunday on/before this date"),
+    db: Session = Depends(get_db),
+):
+    if confirm != "RESET-CADENCE":
+        raise HTTPException(status_code=400, detail="Confirmation token mismatch")
+
+    sigs = tuple(s.strip().lower() for s in signals.split(",") if s.strip() in {"give","attend","group"})
+
+    # 1) Clear derived tables
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("TRUNCATE TABLE lapse_events;")
+        cur.execute("TRUNCATE TABLE snap_person_week;")
+        cur.execute("TRUNCATE TABLE person_cadence;")
+        conn.commit()
+    finally:
+        cur.close(); conn.close()
+
+    last_sun = get_last_sunday_cst()
+
+    if not backfill:
+        # One-week rebuild (current week only)
+        rebuild_person_cadence(db, signals=sigs, rolling_days=DEFAULT_ROLLING_DAYS, as_of=last_sun)
+        build_weekly_snapshot(db, week_end=last_sun)
+        payload = detect_and_write_lapses_for_week(last_sun, signals=("attend","give","serve"), inactivity_days_for_drop=180)
+        return {
+            "status": "ok",
+            "mode": "current_week_only",
+            "week_end": str(last_sun),
+            "newly_lapsed_by_signal": payload.get("counts_by_signal", {}),
+            "all_lapsed_by_signal": payload.get("all_lapsed_counts", {}),
+        }
+
+    # backfill = True → rebuild everything
+    def _earliest_for_signals(sigs: tuple[str, ...]) -> date:
+        # Only look at sources we’re rebuilding
+        q = []
+        if "attend" in sigs:
+            q.append("SELECT MIN(svc_date)::date AS d FROM f_checkins_person")
+        if "give" in sigs:
+            q.append("SELECT MIN(week_end)::date   AS d FROM f_giving_person_week")
+        if "group" in sigs:
+            q.append("SELECT MIN(first_joined_at::date) AS d FROM f_groups_memberships")
+        sql = " WITH mins AS (" + " UNION ALL ".join(q) + ") SELECT MIN(d)::date FROM mins;"
+        conn = get_conn(); cur = conn.cursor()
+        try:
+            cur.execute(sql)
+            d = cur.fetchone()[0]
+            return d or last_sun
+        finally:
+            cur.close(); conn.close()
+
+    start = start_date or _earliest_for_signals(sigs)
+    end   = end_date or last_sun
+
+    # Snap to Sundays: first Sunday ≥ start, last Sunday ≤ end
+    first_sunday = start + timedelta(days=(6 - start.weekday()) % 7)             # Mon=0..Sun=6
+    last_sunday  = end - timedelta(days=((end.weekday() + 1) % 7))               # back to prior/same Sunday
+
+    if first_sunday > last_sunday:
+        raise HTTPException(status_code=400, detail=f"No Sundays in range {start}..{end}")
+
+    # Iterate Sundays
+    weeks_processed = 0
+    wk = first_sunday
+    while wk <= last_sunday:
+        rebuild_person_cadence(db, signals=sigs, rolling_days=DEFAULT_ROLLING_DAYS, as_of=wk)
+        build_weekly_snapshot(db, week_end=wk)
+        detect_and_write_lapses_for_week(wk, signals=("attend","give","serve"), inactivity_days_for_drop=180)
+        weeks_processed += 1
+        wk += timedelta(days=7)
+
+    return {
+        "status": "ok",
+        "mode": "range_backfill",
+        "signals": sigs,
+        "from": str(first_sunday),
+        "to": str(last_sunday),
+        "weeks_processed": weeks_processed,
     }
 
 

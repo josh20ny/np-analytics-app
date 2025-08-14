@@ -27,3 +27,7 @@ token.json
 np-analytics-app.txt
 np-analytics-db-structure.txt
 token.json
+
+logs/
+.backfill.pid
+
