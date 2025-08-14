@@ -3,6 +3,7 @@
 import requests
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
+from typing import Optional
 
 from clickup_app.config import CLIENT_ID, CLIENT_SECRET
 from clickup_app.crud import get_token, create_or_update_token
@@ -74,3 +75,40 @@ def post_message(
     resp = requests.post(url, json=payload, headers=headers, timeout=30)
     resp.raise_for_status()
     return resp.json()
+
+
+def format_user_mention(user_id: str, display_name: Optional[str] = None) -> str:
+    """
+    Returns a mention that renders as the user's name in ClickUp Chat and notifies them.
+    If display_name is provided, show it; otherwise the link still resolves to the user.
+    """
+    url = f"clickup://user/{user_id}"
+    return f"[{display_name}]({url})" if display_name else url
+
+def get_channel_members_map(db, workspace_id: str, channel_id: str) -> dict[str, str]:
+    """
+    Returns {user_id: display_name} for members of a channel.
+    Falls back gracefully if fields are missing.
+    """
+    access_token = get_access_token(db, workspace_id)
+    url = f"{API_BASE}/workspaces/{workspace_id}/chat/channels/{channel_id}/members"
+    headers = {"Authorization": access_token, "Accept": "application/json"}
+    resp = requests.get(url, headers=headers, timeout=30)
+    resp.raise_for_status()
+    data = resp.json() or {}
+    members = data.get("members") or data.get("data") or []  # schema guard
+    out = {}
+    for m in members:
+        # try a few likely shapes
+        uid = str(m.get("id") or (m.get("user") or {}).get("id") or "")
+        name = (
+            m.get("username")
+            or (m.get("user") or {}).get("username")
+            or (m.get("user") or {}).get("email")
+            or (m.get("user") or {}).get("name")
+            or ""
+        )
+        if uid:
+            out[uid] = name
+    return out
+
