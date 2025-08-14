@@ -4,12 +4,14 @@ import requests
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from typing import Optional
+from functools import lru_cache
 
 from clickup_app.config import CLIENT_ID, CLIENT_SECRET
 from clickup_app.crud import get_token, create_or_update_token
 
 TOKEN_URL = "https://api.clickup.com/api/v2/oauth/token"
 API_BASE  = "https://api.clickup.com/api/v3"
+API_V2 = "https://api.clickup.com/api/v2"
 
 def get_access_token(db, workspace_id: str) -> str:
     token_row = get_token(db, workspace_id)
@@ -49,6 +51,27 @@ def get_access_token(db, workspace_id: str) -> str:
             raise RuntimeError(f"ClickUp token refresh failed: {e}") from e
 
     return token_row.access_token  # raw token for v3 Chat APIs
+
+@lru_cache(maxsize=32)
+def get_bot_user_id(db, workspace_id: str) -> str:
+    """
+    Return the OAuth app's user id (the "me" user). Cached in-process.
+    If CLICKUP_BOT_USER_ID env is set, use it.
+    """
+    import os
+    env_id = os.getenv("CLICKUP_BOT_USER_ID")
+    if env_id:
+        return str(env_id)
+
+    access_token = get_access_token(db, workspace_id)
+    # v2: Authorized User
+    resp = requests.get(f"{API_V2}/user", headers={"Authorization": access_token, "Accept": "application/json"}, timeout=30)
+    resp.raise_for_status()
+    data = resp.json() or {}
+    uid = data.get("user", {}).get("id")
+    if not uid:
+        raise RuntimeError("Could not determine bot user id from /v2/user response")
+    return str(uid)
 
 def post_message(
     db: Session,
