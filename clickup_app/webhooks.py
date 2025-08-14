@@ -74,7 +74,7 @@ async def receive_clickup_automation(
     if re.search(r"\bOU\b", content, flags=re.IGNORECASE):
         now = datetime.now(timezone('America/Chicago'))
         reply = (
-            f"I have detected OU in your message.The time is {now.strftime('%I:%M %p')} and OU *still sucks*! 🤘🐂"
+            f"I have detected OU in your message. The time is {now.strftime('%I:%M %p')} and OU *still sucks*! 🤘🐂"
         )
 
         display_name = None
