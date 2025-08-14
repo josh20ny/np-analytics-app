@@ -3,6 +3,8 @@
 from fastapi import APIRouter, Request, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 from app.db import get_db
+from datetime import datetime
+from pytz import timezone
 
 from clickup_app.assistant_client import run_assistant_with_tools
 from clickup_app.clickup_client import post_message, get_channel_members_map, format_user_mention
@@ -28,33 +30,47 @@ async def receive_clickup_automation(
     workspace_id = body.get("team_id") or os.getenv("CLICKUP_WORKSPACE_ID")
 
     # 2) Only respond if mentioned
-    if not content or not channel_id or "@NP Analytics Bot" not in content:
-        return {"status": "ignored"}
+    if "@NP Analytics Bot" in content: 
+        prompt = content.replace("@NP Analytics Bot", "").strip()
 
-    prompt = content.replace("@NP Analytics Bot", "").strip()
-
-    # 3) Do the heavy lifting in the background
-    def handle():
-        try:
-            reply = run_assistant_with_tools(prompt)
-
-            # Try to resolve a nicer display name; fall back to id
-            display_name = None
+        # 3) Do the heavy lifting in the background
+        def handle():
             try:
-                members_map = get_channel_members_map(db, workspace_id, channel_id)
-                display_name = members_map.get(user_id)
+                reply = run_assistant_with_tools(prompt)
+
+                # Try to resolve a nicer display name; fall back to id
+                display_name = None
+                try:
+                    members_map = get_channel_members_map(db, workspace_id, channel_id)
+                    display_name = members_map.get(user_id)
+                except Exception as e:
+                    print(f"[clickup] members lookup failed: {e}")
+
+                mention = format_user_mention(user_id, display_name)
+                message = f"{mention} {reply}".strip()
+
+                post_message(db, workspace_id, channel_id, message)
+                print("✅ Posted reply to ClickUp (OAuth)")
             except Exception as e:
-                print(f"[clickup] members lookup failed: {e}")
+                print(f"❌ Error handling webhook: {e}")
 
-            mention = format_user_mention(user_id, display_name)
-            message = f"{mention} {reply}".strip()
-
-            post_message(db, workspace_id, channel_id, message)
-            print("✅ Posted reply to ClickUp (OAuth)")
+        background_tasks.add_task(handle)
+        return {"status": "accepted"}
+    elif "ou" in content:
+        now = datetime.now(timezone('America/Chicago'))
+        reply = f"I have deteceted OU in your message.\n The time is {now.strftime("%I:%M %p")} and OU still sucks! 🤘🐂"
+        try:
+            members_map = get_channel_members_map(db, workspace_id, channel_id)
+            display_name = members_map.get(user_id)
         except Exception as e:
-            print(f"❌ Error handling webhook: {e}")
+            print(f"[clickup] members lookup failed: {e}")
 
-    background_tasks.add_task(handle)
-    return {"status": "accepted"}
+        mention = format_user_mention(user_id, display_name)
+        message = f"{mention} {reply}".strip()
+
+        post_message(db, workspace_id, channel_id, message)
+
+    else:
+        return {"status": "ignored"}
 
 
