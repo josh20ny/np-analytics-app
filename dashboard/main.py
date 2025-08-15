@@ -1,18 +1,12 @@
-import streamlit as st
-from data import load_table, engine
-from config import TAB_CONFIG
-# Optional per-tab filters (e.g., InsideOut: keep rows where total_attendance >= 5)
-try:
-    from config import TABLE_FILTERS  # optional override
-except Exception:
-    TABLE_FILTERS = {}
+# dashboard/main.py
 
-from widgets import (
-    pie_chart,
-    kpi_card,
-    overlay_years_chart,
-    filter_meaningful_rows,  # signature: (df, metric_col=None, min_value=1)
-)
+# ── Load env FIRST ────────────────────────────────────────────────────────────
+from dotenv import load_dotenv
+load_dotenv()
+
+# ── Standard libs / third-party ───────────────────────────────────────────────
+import os
+import streamlit as st
 import pandas as pd
 from datetime import datetime, time
 from pandas.api.types import (
@@ -21,20 +15,61 @@ from pandas.api.types import (
     is_numeric_dtype,
 )
 
+# ── Project imports (now that env is loaded) ──────────────────────────────────
+from data import load_table, engine
+from config import TAB_CONFIG
+from widgets import (
+    pie_chart,
+    kpi_card,
+    overlay_years_chart,
+    filter_meaningful_rows,  # signature: (df, metric_col=None, min_value=1)
+)
+from lib.auth import login_gate, registration_panel, verification_panel, password_tools
+from lib.emailer import send_email
+
+# ──────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="NP Analytics", layout="wide", initial_sidebar_state="expanded")
+st.title("📊 NP Analytics")
+
+# ── Auth gate ─────────────────────────────────────────────────────────────────
+authed = login_gate("NP Analytics Login", render_if_unauth=True)
+if not authed:
+    registration_panel()
+    verification_panel()
+    st.stop()
+
+# ✅ From here down, user is authenticated
+password_tools()
+
+# ── Quick email test (SendGrid or console backend) ────────────────────────────
+with st.expander("✉️ Send a test email"):
+    to = st.text_input("To", value=os.getenv("TEST_EMAIL", "you@personal.com"))
+    if st.button("Send test"):
+        try:
+            send_email(to, "NP Analytics test", "If you got this, email is wired.")
+            st.success(f"Sent to {to}")
+        except Exception as e:
+            st.error(f"Failed: {e}")
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Default per-tab filters (override by defining TABLE_FILTERS in config.py)
 DEFAULT_TABLE_FILTERS = {
     "InsideOut": {"metric_col": "total_attendance", "min_value": 5},
 }
+try:
+    from config import TABLE_FILTERS  # optional override
+except Exception:
+    TABLE_FILTERS = {}
 TABLE_FILTERS = {**DEFAULT_TABLE_FILTERS, **TABLE_FILTERS}
 
 def format_date_series(s: pd.Series) -> pd.Series:
+    """Format a series of dates as 'Month DD, YYYY' safely."""
     s = pd.to_datetime(s, errors="coerce")
-    return s.dt.strftime("%B ") + s.dt.day.astype(str) + s.dt.strftime(", %Y")
+    return s.dt.strftime("%B %d, %Y").fillna("")
 
 def format_display_dates(df: pd.DataFrame, exclude=("parsed_date",)) -> pd.DataFrame:
     """
-    Convert only actual date-like columns to 'Month D, YYYY'.
+    Convert only actual date-like columns to 'Month DD, YYYY'.
     - Skip numeric columns entirely (keeps counts/ratios numeric).
     - For object columns, only treat as dates if ≥80% parse AND median year >= 1990.
     - Always format true datetime64 columns.
@@ -67,11 +102,8 @@ def format_display_dates(df: pd.DataFrame, exclude=("parsed_date",)) -> pd.DataF
                     out.loc[:, c] = format_date_series(parsed)
 
     return out
+
 # ──────────────────────────────────────────────────────────────────────────────
-
-st.set_page_config(page_title="NP Analytics", layout="wide")
-st.title("📊 NP Analytics")
-
 tabs = st.tabs(list(TAB_CONFIG.keys()))
 for tab_obj, tab_name in zip(tabs, TAB_CONFIG):
     with tab_obj:
@@ -212,7 +244,6 @@ for tab_obj, tab_name in zip(tabs, TAB_CONFIG):
                     if cfg and cfg.get("metric_col") in df_filtered.columns:
                         metric_col = cfg["metric_col"]
                         metric_series = pd.to_numeric(df_filtered[metric_col], errors="coerce")
-                        # choose a reasonable slider max
                         slider_max = int(max(metric_series.max(skipna=True) or 0, cfg.get("min_value", 1)))
                         ui_min = st.slider(
                             f"Minimum rows to show (filter by '{metric_col}')",
@@ -270,8 +301,7 @@ for tab_obj, tab_name in zip(tabs, TAB_CONFIG):
                 # Service time pie
                 if (
                     title == "Service Time Distribution"
-                    and table
-                    in [
+                    and table in [
                         "adult_attendance",
                         "waumbaland_attendance",
                         "upstreet_attendance",

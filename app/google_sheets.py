@@ -29,7 +29,8 @@ def process_adult_attendance_from_sheet():
 
     result = sheet_api.values().get(
         spreadsheetId=settings.GOOGLE_SPREADSHEET_ID,
-        range=f"{settings.GOOGLE_SHEET_NAME}!A2:F"
+        range=f"{settings.GOOGLE_SHEET_NAME}!A2:F",
+        valueRenderOption="UNFORMATTED_VALUE"  # <-- NEW: dates come back as serial numbers
     ).execute()
     rows = result.get("values", [])
 
@@ -109,5 +110,3 @@ def process_adult_attendance_from_sheet():
 @router.get("/process")
 def trigger_process():
     return process_adult_attendance_from_sheet()
-
-
