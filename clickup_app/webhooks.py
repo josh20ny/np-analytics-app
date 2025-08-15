@@ -1,10 +1,12 @@
 # clickup_app/webhooks.py
 import re
+import time
 from fastapi import APIRouter, Request, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 from app.db import get_db
 from datetime import datetime
 from pytz import timezone
+from collections import OrderedDict
 
 from clickup_app.assistant_client import run_assistant_with_tools
 from clickup_app.clickup_client import (
@@ -31,6 +33,9 @@ async def receive_clickup_automation(
     channel_id   = data.get("parent") or data.get("channel_id")
     user_id      = str(data.get("userid") or (data.get("user") or {}).get("id") or "")
     workspace_id = body.get("team_id") or os.getenv("CLICKUP_WORKSPACE_ID")
+    msg_id = str(data.get("id") or f"{workspace_id}:{channel_id}:{user_id}:{content}")
+    if _seen(msg_id):
+        return {"status": "ignored_duplicate"}
 
     # 🚫 Ignore if missing basics
     if not content or not channel_id:
@@ -71,7 +76,7 @@ async def receive_clickup_automation(
         return {"status": "accepted"}
 
     # ── Branch 2: fun OU message ──────────────────────────────────────────────
-    if re.search(r"\bOU\b", content, flags=re.IGNORECASE):
+    elif "ou" in content.casefold():
         now = datetime.now(timezone('America/Chicago'))
         reply = (
             f"I have detected OU in your message. The time is {now.strftime('%I:%M %p')} and OU *still sucks*! 🤘🐂"
@@ -91,3 +96,15 @@ async def receive_clickup_automation(
 
     return {"status": "ignored"}
 
+_DEDUPE: "OrderedDict[str, float]" = OrderedDict()
+_DEDUPE_TTL = 60.0  # seconds
+
+def _seen(key: str) -> bool:
+    now = time.time()
+    # purge old
+    while _DEDUPE and (now - next(iter(_DEDUPE.values()))) > _DEDUPE_TTL:
+        _DEDUPE.popitem(last=False)
+    if key in _DEDUPE:
+        return True
+    _DEDUPE[key] = now
+    return False
