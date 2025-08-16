@@ -1,19 +1,5 @@
-# dashboard/widgets/__init__.py
+# Re-export legacy (already in your repo)
+from .legacy import overlay_years_chart, weekly_yoy_table, pie_chart, kpi_card
 
-# Legacy widgets (wherever they live now)
-from .legacy import (      # rename from widgets.py -> widgets/legacy.py
-    overlay_years_chart,
-    weekly_yoy_table,
-    pie_chart,
-    kpi_card,
-    filter_meaningful_rows,   # if you still use it elsewhere
-)
-
-# Engagement widgets
+# Engagement widgets (new file below)
 from .engagement import stat_row, cadence_bars, people_table
-
-# Optional: core helpers if you added them
-try:
-    from .core import ranged_table
-except Exception:
-    pass

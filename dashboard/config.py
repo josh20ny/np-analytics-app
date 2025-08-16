@@ -1,7 +1,6 @@
-from widgets.legacy import overlay_years_chart, weekly_yoy_table, pie_chart, kpi_card
-from widgets.engagement import stat_row, cadence_bars, people_table
+from widgets import overlay_years_chart, weekly_yoy_table, pie_chart, kpi_card
+from widgets import stat_row, cadence_bars, people_table
 from services.engagement import get_recent_engagement, get_cadence_summary, get_lapsed_people
-
 
 # Mapping of tabs to widget definitions
 # Each widget: loader=(table_name, date_col, value_col), widget=function, args=dict
@@ -20,6 +19,7 @@ TAB_CONFIG = {
          "widget": kpi_card,
          "args": {"label": "Total Groups"}},
     ],
+
     "Waumba Land Attendance": [
         {"loader": ("waumbaland_attendance", "date", "total_attendance"),
          "widget": overlay_years_chart,
@@ -37,6 +37,7 @@ TAB_CONFIG = {
          "widget": pie_chart,
          "args": {"title": "Age Distribution"}},
     ],
+
     "UpStreet Attendance": [
         {"loader": ("upstreet_attendance", "date", "total_attendance"),
          "widget": overlay_years_chart,
@@ -54,6 +55,7 @@ TAB_CONFIG = {
          "widget": pie_chart,
          "args": {"title": "Grade Distribution"}},
     ],
+
     "Transit Attendance": [
         {"loader": ("transit_attendance", "date", "total_attendance"),
          "widget": overlay_years_chart,
@@ -71,6 +73,7 @@ TAB_CONFIG = {
          "widget": pie_chart,
          "args": {"title": "Grade Distribution"}},
     ],
+
     "InsideOut Attendance": [
         {"loader": ("insideout_attendance", "date", "total_attendance"),
          "widget": overlay_years_chart,
@@ -88,6 +91,7 @@ TAB_CONFIG = {
          "widget": pie_chart,
          "args": {"title": "Grade Distribution"}},
     ],
+
     "YouTube": [
         {"loader": ("livestreams", "published_at", "initial_views"),
          "widget": overlay_years_chart,
@@ -99,6 +103,7 @@ TAB_CONFIG = {
          "widget": weekly_yoy_table,
          "args": {"title": "Livestream views YoY by Week"}},
     ],
+
     "Mailchimp": [
         {"loader": ("mailchimp_weekly_summary", "week_end", "avg_open_rate"),
          "widget": weekly_yoy_table,
@@ -107,34 +112,27 @@ TAB_CONFIG = {
          "widget": weekly_yoy_table,
          "args": {"title": "Click Rate YoY by Week"}},
     ],
+
     "Giving": [
         {"loader": ("weekly_giving_summary", "week_end", "total_giving"),
          "widget": overlay_years_chart,
-         "args": {"title": "Total Giving by Year"},},
+         "args": {"title": "Total Giving by Year"}},
         {"loader": ("weekly_giving_summary", "week_end", "total_giving"),
          "widget": weekly_yoy_table,
-         "args": {"title": "Total Giving YoY by Week"},},
-    ],    
+         "args": {"title": "Total Giving YoY by Week"}},
+    ],
+
     "Engagement": [
         {"loader": ("__service__", "ignored", None),
          "widget": stat_row,
          "args": {"title": "This Week", "provider": get_recent_engagement}},
+
         {"loader": ("__service__", "ignored", None),
          "widget": cadence_bars,
          "args": {"title": "Current Cadence Buckets", "provider": get_cadence_summary}},
+
         {"loader": ("__service__", "ignored", None),
          "widget": people_table,
-         "args": {"title": "Lapsed (13+ weeks)", "provider": get_lapsed_people, "limit": 100}},
-    ],
-    "Front Door": [
-        # placeholder — we’ll refine once your ETL for “first timers / follow-ups” lands
-        {"loader": ("__service__", "ignored", None),
-         "widget": stat_row,
-         "args": {"title": "Front-Door Snapshot", "provider": get_recent_engagement}},
-    ],
-    "Back Door": [
-        {"loader": ("__service__", "ignored", None),
-         "widget": people_table,
-         "args": {"title": "At-Risk / Lapsed", "provider": get_lapsed_people, "limit": 100}},
+         "args": {"title": "Lapsed (newly flagged)", "provider": get_lapsed_people, "limit": 100}},
     ],
 }
