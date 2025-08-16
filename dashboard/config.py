@@ -1,4 +1,7 @@
-from widgets import overlay_years_chart, weekly_yoy_table, pie_chart, kpi_card
+from widgets.legacy import overlay_years_chart, weekly_yoy_table, pie_chart, kpi_card
+from widgets.engagement import stat_row, cadence_bars, people_table
+from services.engagement import get_recent_engagement, get_cadence_summary, get_lapsed_people
+
 
 # Mapping of tabs to widget definitions
 # Each widget: loader=(table_name, date_col, value_col), widget=function, args=dict
@@ -112,7 +115,26 @@ TAB_CONFIG = {
          "widget": weekly_yoy_table,
          "args": {"title": "Total Giving YoY by Week"},},
     ],    
-    "Engagement": [],
-    "Front Door": [],
-    "Back Door": [],
+    "Engagement": [
+        {"loader": ("__service__", "ignored", None),
+         "widget": stat_row,
+         "args": {"title": "This Week", "provider": get_recent_engagement}},
+        {"loader": ("__service__", "ignored", None),
+         "widget": cadence_bars,
+         "args": {"title": "Current Cadence Buckets", "provider": get_cadence_summary}},
+        {"loader": ("__service__", "ignored", None),
+         "widget": people_table,
+         "args": {"title": "Lapsed (13+ weeks)", "provider": get_lapsed_people, "limit": 100}},
+    ],
+    "Front Door": [
+        # placeholder — we’ll refine once your ETL for “first timers / follow-ups” lands
+        {"loader": ("__service__", "ignored", None),
+         "widget": stat_row,
+         "args": {"title": "Front-Door Snapshot", "provider": get_recent_engagement}},
+    ],
+    "Back Door": [
+        {"loader": ("__service__", "ignored", None),
+         "widget": people_table,
+         "args": {"title": "At-Risk / Lapsed", "provider": get_lapsed_people, "limit": 100}},
+    ],
 }

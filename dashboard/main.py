@@ -1,33 +1,20 @@
 # dashboard/main.py
-
-# ── Load env FIRST ────────────────────────────────────────────────────────────
 from dotenv import load_dotenv
 load_dotenv()
 
-# ── Standard libs / third-party ───────────────────────────────────────────────
 import os
 import streamlit as st
 import pandas as pd
 from datetime import datetime, time
-from pandas.api.types import (
-    is_datetime64_any_dtype,
-    is_object_dtype,
-    is_numeric_dtype,
-)
+from pandas.api.types import is_numeric_dtype  # used inside Mailchimp averages
 
-# ── Project imports (now that env is loaded) ──────────────────────────────────
 from data import load_table, engine
 from config import TAB_CONFIG
-from widgets import (
-    pie_chart,
-    kpi_card,
-    overlay_years_chart,
-    filter_meaningful_rows,  # signature: (df, metric_col=None, min_value=1)
-)
+from widgets.legacy import pie_chart, kpi_card, overlay_years_chart, filter_meaningful_rows
+from widgets.core import ranged_table
 from lib.auth import login_gate, registration_panel, verification_panel, password_tools
 from lib.emailer import send_email
 
-# ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="NP Analytics", layout="wide", initial_sidebar_state="expanded")
 st.title("📊 NP Analytics")
 
@@ -38,258 +25,100 @@ if not authed:
     verification_panel()
     st.stop()
 
-# ✅ From here down, user is authenticated
 password_tools()
 
-# ── Quick email test (SendGrid or console backend) ────────────────────────────
+# ── Email test ────────────────────────────────────────────────────────────────
 with st.expander("✉️ Send a test email"):
     to = st.text_input("To", value=os.getenv("TEST_EMAIL", "you@personal.com"))
     if st.button("Send test"):
         try:
-            send_email(to, "NP Analytics test", "If you got this, email is wired.")
+            send_email(to, "NP Analytics test", "If you got this, SendGrid is wired.")
             st.success(f"Sent to {to}")
         except Exception as e:
             st.error(f"Failed: {e}")
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Default per-tab filters (override by defining TABLE_FILTERS in config.py)
-DEFAULT_TABLE_FILTERS = {
-    "InsideOut": {"metric_col": "total_attendance", "min_value": 5},
-}
-try:
-    from config import TABLE_FILTERS  # optional override
-except Exception:
-    TABLE_FILTERS = {}
-TABLE_FILTERS = {**DEFAULT_TABLE_FILTERS, **TABLE_FILTERS}
-
-def format_date_series(s: pd.Series) -> pd.Series:
-    """Format a series of dates as 'Month DD, YYYY' safely."""
-    s = pd.to_datetime(s, errors="coerce")
-    return s.dt.strftime("%B %d, %Y").fillna("")
-
-def format_display_dates(df: pd.DataFrame, exclude=("parsed_date",)) -> pd.DataFrame:
-    """
-    Convert only actual date-like columns to 'Month DD, YYYY'.
-    - Skip numeric columns entirely (keeps counts/ratios numeric).
-    - For object columns, only treat as dates if ≥80% parse AND median year >= 1990.
-    - Always format true datetime64 columns.
-    """
-    out = df.copy()
-    for c in out.columns:
-        if c in exclude:
-            continue
-        col = out[c]
-
-        # 1) Never touch numeric columns
-        if is_numeric_dtype(col):
-            continue
-
-        # 2) True datetimes → format
-        if is_datetime64_any_dtype(col):
-            out.loc[:, c] = format_date_series(col)
-            continue
-
-        # 3) Object columns → cautiously parse
-        if is_object_dtype(col):
-            non_null = col.notna().sum()
-            if non_null == 0:
-                continue
-            parsed = pd.to_datetime(col, errors="coerce", infer_datetime_format=True)
-            good_ratio = parsed.notna().sum() / non_null
-            if good_ratio >= 0.8:
-                years = parsed.dt.year.dropna()
-                if not years.empty and years.median() >= 1990:
-                    out.loc[:, c] = format_date_series(parsed)
-
-    return out
 
 # ──────────────────────────────────────────────────────────────────────────────
 tabs = st.tabs(list(TAB_CONFIG.keys()))
 for tab_obj, tab_name in zip(tabs, TAB_CONFIG):
     with tab_obj:
         widgets = TAB_CONFIG[tab_name]
-
         if not widgets:
             st.write(f"**{tab_name}** tab coming soon!")
             continue
 
-        # ─── Dynamic Raw Data Table with Date Range ─────────────────────────────
         first_loader = widgets[0]["loader"]
         table_all, date_col_all, value_col_all = first_loader
+        is_service_tab = (table_all == "__service__")
 
+        # ─── Raw data section (skip for service-backed tabs) ───────────────────
         try:
-            # Special handling for Mailchimp: split by audience
-            if tab_name == "Mailchimp":
-                audiences = [
-                    "Northpoint Church",
-                    "InsideOut Parents",
-                    "Transit Parents",
-                    "Upstreet Parents",
-                    "Waumba Land Parents",
-                ]
-                for aud in audiences:
-                    df_aud = pd.read_sql(
-                        f"SELECT * FROM {table_all} WHERE audience_name = %s",
-                        engine,
-                        params=(aud,),
-                        parse_dates=[date_col_all],
-                    )
-                    st.subheader(f"Filtered rows for {aud}")
+            if not is_service_tab:
+                if tab_name == "Mailchimp":
+                    audiences = [
+                        "Northpoint Church", "InsideOut Parents", "Transit Parents",
+                        "Upstreet Parents", "Waumba Land Parents",
+                    ]
+                    for aud in audiences:
+                        df_aud = pd.read_sql(
+                            f"SELECT * FROM {table_all} WHERE audience_name = %s",
+                            engine,
+                            params=(aud,),
+                            parse_dates=[date_col_all],
+                        )
+                        st.subheader(f"Filtered rows for {aud}")
 
-                    if df_aud.empty:
-                        st.info("No data.")
-                        continue
+                        if df_aud.empty:
+                            st.info("No data.")
+                            continue
 
-                    df_aud["parsed_date"] = pd.to_datetime(df_aud[date_col_all])
-                    df_aud = df_aud.sort_values("parsed_date", ascending=False)
+                        df_aud["parsed_date"] = pd.to_datetime(df_aud[date_col_all])
+                        df_aud = df_aud.sort_values("parsed_date", ascending=False)
 
-                    default_end = df_aud["parsed_date"].iloc[0]
-                    default_start = (
-                        df_aud["parsed_date"].iloc[9]
-                        if len(df_aud) >= 10
-                        else df_aud["parsed_date"].min()
-                    )
+                        default_end = df_aud["parsed_date"].iloc[0]
+                        default_start = df_aud["parsed_date"].iloc[min(9, len(df_aud)-1)]
 
-                    start_date, end_date = st.date_input(
-                        f"Select date range for {aud}",
-                        value=(default_start.date(), default_end.date()),
-                        min_value=df_aud["parsed_date"].min().date(),
-                        max_value=default_end.date(),
-                        key=f"aud_range_{aud}",
-                    )
-                    start_dt = datetime.combine(start_date, time.min)
-                    end_dt = datetime.combine(end_date, time.max)
+                        start_date, end_date = st.date_input(
+                            f"Select date range for {aud}",
+                            value=(default_start.date(), default_end.date()),
+                            min_value=df_aud["parsed_date"].min().date(),
+                            max_value=default_end.date(),
+                            key=f"aud_range_{aud}",
+                        )
+                        start_dt = datetime.combine(start_date, time.min)
+                        end_dt = datetime.combine(end_date, time.max)
 
-                    df_filtered = (
-                        df_aud[
-                            (df_aud["parsed_date"] >= start_dt)
-                            & (df_aud["parsed_date"] <= end_dt)
-                        ]
-                        .sort_values("parsed_date", ascending=False)
-                        .copy()
-                    )
+                        df_filtered = (
+                            df_aud[(df_aud["parsed_date"] >= start_dt) & (df_aud["parsed_date"] <= end_dt)]
+                            .sort_values("parsed_date", ascending=False)
+                            .copy()
+                        )
 
-                    # Reformat visible date-ish columns
-                    display_df = format_display_dates(df_filtered)
+                        # Simple display
+                        st.dataframe(df_filtered.drop(columns=["parsed_date"], errors="ignore"), use_container_width=True)
 
-                    # Optional: show/hide parsed_date
-                    show_parsed = st.checkbox(
-                        "Show parsed_date", value=False, key=f"show_parsed_{tab_name}_{aud}"
-                    )
-                    if not show_parsed:
-                        display_df = display_df.drop(columns=["parsed_date"], errors="ignore")
-
-                    # Force-format common date columns
-                    for col in ("date", "week_start", "week_end"):
-                        if col in display_df.columns:
-                            display_df[col] = format_date_series(display_df[col])
-
-                    if display_df.empty:
-                        st.warning("No rows in selected range.")
-                    else:
-                        st.dataframe(display_df, use_container_width=True)
-
-                        # Averages row (numeric columns only)
-                        numeric_cols = display_df.select_dtypes(include="number").columns
-                        if len(numeric_cols) > 0:
-                            avg_row = (
-                                display_df[numeric_cols].mean(numeric_only=True).to_frame().T
-                            )
+                        # Averages row
+                        numeric_cols = [c for c in df_filtered.columns if is_numeric_dtype(df_filtered[c])]
+                        if numeric_cols:
+                            avg_row = (df_filtered[numeric_cols].mean(numeric_only=True).to_frame().T)
                             avg_row.index = ["Averages"]
                             st.dataframe(avg_row, use_container_width=True)
 
-            else:
-                # Standard date‐range table for all other tabs
-                df_all = pd.read_sql(
-                    f"SELECT * FROM {table_all}", engine, parse_dates=[date_col_all]
-                )
-
-                st.subheader(f"Filtered rows from `{table_all}` table")
-
-                if df_all.empty:
-                    st.info("No data.")
                 else:
-                    df_all["parsed_date"] = pd.to_datetime(df_all[date_col_all])
-                    df_all = df_all.sort_values("parsed_date", ascending=False)
-
-                    default_end = df_all["parsed_date"].iloc[0]
-                    default_start = (
-                        df_all["parsed_date"].iloc[9]
-                        if len(df_all) >= 10
-                        else df_all["parsed_date"].min()
-                    )
-
-                    start_date, end_date = st.date_input(
-                        f"Select date range for {tab_name}",
-                        value=(default_start.date(), default_end.date()),
-                        min_value=df_all["parsed_date"].min().date(),
-                        max_value=default_end.date(),
+                    # Generic case → single helper
+                    cfg = {}  # you may have TABLE_FILTERS in config; handled below in widget loop
+                    metric_col = cfg.get("metric_col") if cfg else None
+                    min_val = cfg.get("min_value") if cfg else None
+                    ranged_table(
+                        table_all, date_col_all,
+                        title=f"Filtered rows from `{table_all}`",
+                        metric_col=metric_col, min_value=min_val,
                         key=f"range_{tab_name}",
                     )
-                    start_dt = datetime.combine(start_date, time.min)
-                    end_dt = datetime.combine(end_date, time.max)
-
-                    df_filtered = (
-                        df_all[
-                            (df_all["parsed_date"] >= start_dt)
-                            & (df_all["parsed_date"] <= end_dt)
-                        ]
-                        .sort_values("parsed_date", ascending=False)
-                        .copy()
-                    )
-
-                    # Live threshold slider if this tab has a configured metric filter
-                    cfg = TABLE_FILTERS.get(tab_name)
-                    display_df = df_filtered
-                    if cfg and cfg.get("metric_col") in df_filtered.columns:
-                        metric_col = cfg["metric_col"]
-                        metric_series = pd.to_numeric(df_filtered[metric_col], errors="coerce")
-                        slider_max = int(max(metric_series.max(skipna=True) or 0, cfg.get("min_value", 1)))
-                        ui_min = st.slider(
-                            f"Minimum rows to show (filter by '{metric_col}')",
-                            min_value=0,
-                            max_value=max(slider_max, 1),
-                            value=int(cfg.get("min_value", 1)),
-                            key=f"thresh_{tab_name}",
-                        )
-                        display_df = filter_meaningful_rows(df_filtered, metric_col=metric_col, min_value=ui_min)
-                    elif cfg:
-                        # fall back to static config if metric column missing
-                        display_df = filter_meaningful_rows(df_filtered, **cfg)
-
-                    # Reformat visible date-ish columns
-                    display_df = format_display_dates(display_df)
-
-                    # Optional: show/hide parsed_date
-                    show_parsed = st.checkbox(
-                        "Show parsed_date", value=False, key=f"show_parsed_{tab_name}"
-                    )
-                    if not show_parsed:
-                        display_df = display_df.drop(columns=["parsed_date"], errors="ignore")
-
-                    # Force-format common date columns
-                    for col in ("date", "week_start", "week_end"):
-                        if col in display_df.columns:
-                            display_df[col] = format_date_series(display_df[col])
-
-                    if display_df.empty:
-                        st.warning("No rows with meaningful data in selected range.")
-                    else:
-                        st.dataframe(display_df, use_container_width=True)
-
-                        # Averages row (numeric columns only)
-                        numeric_cols = display_df.select_dtypes(include="number").columns
-                        if len(numeric_cols) > 0:
-                            avg_row = (
-                                display_df[numeric_cols].mean(numeric_only=True).to_frame().T
-                            )
-                            avg_row.index = ["Averages"]
-                            st.dataframe(avg_row, use_container_width=True)
 
         except Exception as e:
             st.warning(f"Could not load data for `{table_all}`: {e}")
 
-        # ─── Widgets ─────────────────────────────────────────
+        # ─── Widgets (unchanged logic) ─────────────────────────────────────────
         for meta in widgets:
             table, date_col, value_col = meta["loader"]
             widget_fn = meta["widget"]
