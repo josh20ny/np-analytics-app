@@ -85,3 +85,30 @@ def mark_verified(email: str):
             WHERE email = :e
         """), {"e": email})
 
+def fetch_users_all():
+    with connect() as c:
+        rows = c.execute(text("""
+            SELECT id, email, username, name, role, is_active, is_verified,
+                   created_at, verified_at, updated_at
+            FROM users
+            ORDER BY created_at DESC
+        """)).mappings().all()
+        return [dict(r) for r in rows]
+
+def set_user_role(email: str, role: str):
+    with connect() as c:
+        c.execute(text("UPDATE users SET role=:r, updated_at=NOW() WHERE email=:e"),
+                  {"r": role, "e": email})
+
+def set_user_active(email: str, active: bool):
+    with connect() as c:
+        c.execute(text("UPDATE users SET is_active=:a, updated_at=NOW() WHERE email=:e"),
+                  {"a": active, "e": email})
+
+def approve_user(email: str):
+    with connect() as c:
+        c.execute(text("""
+            UPDATE users
+            SET is_verified = TRUE, verified_at = NOW(), updated_at = NOW()
+            WHERE email=:e
+        """), {"e": email})

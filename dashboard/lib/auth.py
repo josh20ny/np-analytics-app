@@ -33,9 +33,10 @@ def _credentials_dict():
     return {
         "usernames": {
             u["username"]: {
-                "email": u["email"],
-                "name":  u["name"],
-                "password": u["password_hash"],
+                "email":    u["email"],
+                "name":     u["name"],
+                "role":     u["role"],
+                "password": u["password_hash"]
             } for u in users
         }
     }
@@ -53,8 +54,8 @@ def _check_code(code: str, code_hash: str) -> bool:
         return False
 
 def login_gate(title="Login", render_if_unauth=True):
-    """Return True if authenticated. If not authed and render_if_unauth=True,
-    show the login form; otherwise just return False."""
+    """Return True if authenticated. When authed, ensure st.session_state['auth_user']
+    is always refreshed from DB-backed credentials (so role changes take effect)."""
     creds = _credentials_dict()
     authenticator = stauth.Authenticate(
         creds,
@@ -63,41 +64,50 @@ def login_gate(title="Login", render_if_unauth=True):
         float(os.getenv("DASH_COOKIE_EXPIRY_DAYS", "14")),
     )
 
-    # 1) Silent cookie check without showing a form
+    # 1) Silent cookie check (no UI)
     authenticator.login("unrendered", key="login_silent")
-
     status   = st.session_state.get("authentication_status")
     username = st.session_state.get("username")
     name     = st.session_state.get("name")
 
-    if status is True:
-        # ensure our app-level user object exists
-        if "auth_user" not in st.session_state and username:
-            email = creds["usernames"][username]["email"]
-            st.session_state["auth_user"] = {"username": username, "name": name, "email": email}
-        # logout only (no login UI)
+    if status is True and username:
+        # ✅ Always refresh session user from the current creds dict
+        info = creds["usernames"].get(username, {})
+        st.session_state["auth_user"] = {
+            "username": username,
+            "name": name,
+            "email": info.get("email"),
+            "role": info.get("role", "viewer"),
+        }
         authenticator.logout("Logout", "sidebar")
         st.sidebar.caption(f"Signed in as **{name or username}**")
         return True
 
+    # 2) If not authed, optionally render the visible login form
     if render_if_unauth:
-        # 2) Show the visible login form only when NOT authed
         authenticator.login(
             "main",
             fields={"Form name": title, "Username": "Username", "Password": "Password", "Login": "Sign in"},
             clear_on_submit=True,
             key="login_visible",
         )
-        status = st.session_state.get("authentication_status")
-        if status is True:
-            username = st.session_state.get("username"); name = st.session_state.get("name")
-            email = creds["usernames"][username]["email"]
-            st.session_state["auth_user"] = {"username": username, "name": name, "email": email}
+        status   = st.session_state.get("authentication_status")
+        username = st.session_state.get("username")
+        name     = st.session_state.get("name")
+        if status is True and username:
+            info = creds["usernames"].get(username, {})
+            st.session_state["auth_user"] = {
+                "username": username,
+                "name": name,
+                "email": info.get("email"),
+                "role": info.get("role", "viewer"),
+            }
             authenticator.logout("Logout", "sidebar")
             st.sidebar.caption(f"Signed in as **{name or username}**")
             return True
 
     return False
+
 
 def registration_panel():
     if st.session_state.get("authentication_status") is True:
@@ -126,8 +136,16 @@ def registration_panel():
                 st.error("This email domain is not authorized for self-registration."); st.stop()
 
             existing = get_user_by_email(email)
-            if existing and existing.get("is_verified"):
-                st.warning("This email already has a verified account. Try logging in or reset your password."); st.stop()
+            if existing:
+                if existing.get("is_verified"):
+                    st.warning("This email already has a verified account. Try logging in or reset your password."); st.stop()
+                else:
+                    # allow changing password during re-registration
+                    hashed_pw = Hasher.hash(pw1)
+                    update_password(email, hashed_pw)
+            else:
+                hashed_pw = Hasher.hash(pw1)
+                insert_user(email=email, username=username, name=name, role="viewer", password_hash=hashed_pw)
 
             # Create or upsert the user (unverified)
             hashed_pw = Hasher.hash(pw1)
@@ -151,24 +169,30 @@ def registration_panel():
             st.success("Account created. Check your email for a 6-digit code, then verify below.")
 
 def verification_panel():
+    # Don’t show if already logged in
     if st.session_state.get("authentication_status") is True:
         return
-    email = st.session_state.get("pending_verification_email", "")
-    with st.expander("✉️ Verify your email"):
-        email = st.text_input("Email to verify", value=email).strip().lower()
-        code  = st.text_input("6-digit code", max_chars=6)
-        col1, col2 = st.columns(2)
-        verify_btn = col1.button("Verify")
-        resend_btn = col2.button("Resend code")
 
-        if resend_btn:
+    # sensible default from prior registration step
+    default_email = st.session_state.get("pending_verification_email", "")
+
+    with st.expander("✉️ Verify your email"):
+        # Use a form so both buttons are always defined + avoid partial state
+        with st.form("verify_email_form", clear_on_submit=False):
+            email = st.text_input("Email to verify", value=default_email).strip().lower()
+            code  = st.text_input("6-digit code", max_chars=6)
+            c1, c2 = st.columns(2)
+            verify_clicked = c1.form_submit_button("Verify")
+            resend_clicked = c2.form_submit_button("Resend code")
+
+        # Handle resend
+        if resend_clicked:
             if not email:
                 st.error("Enter your email above first.")
             else:
                 new_code = _make_code(6)
                 set_verification(email, _hash_code(new_code))
-                # Optional: look up user's name for the greeting
-                name = (get_user_by_email(email) or {}).get("name","there")
+                name = (get_user_by_email(email) or {}).get("name", "there")
                 send_email(
                     to=email,
                     subject="NP Analytics – Your new verification code",
@@ -180,29 +204,34 @@ def verification_panel():
                 )
                 st.success("A new code was sent if the email exists.")
 
-        if verify_btn:
+        # Handle verify
+        if verify_clicked:
             if not (email and code):
                 st.error("Enter your email and code.")
+                return
+            rec = get_verification(email)
+            if not rec or not rec.get("hash"):
+                st.error("No verification in progress for that email.")
+                return
+            exp = rec.get("expires_at")
+            now = datetime.now(timezone.utc)
+            if exp and now > exp:
+                st.error("That code has expired. Click ‘Resend code’.")
+                return
+            if _check_code(code, rec["hash"]):
+                mark_verified(email)
+                st.session_state.pop("pending_verification_email", None)
+                st.success("Email verified! You can now log in.")
             else:
-                rec = get_verification(email)
-                if not rec or not rec.get("hash"):
-                    st.error("No verification in progress for that email.")
-                else:
-                    exp = rec.get("expires_at")
-                    now = datetime.now(timezone.utc)
-                    if exp and now > exp:
-                        st.error("That code has expired. Click ‘Resend code’.")
-                    elif _check_code(code, rec["hash"]):
-                        mark_verified(email)
-                        st.session_state.pop("pending_verification_email", None)
-                        st.success("Email verified! You can now log in.")
-                    else:
-                        st.error("Invalid code. Check your email and try again.")
+                st.error("Invalid code. Check your email and try again.")
+
 
 def password_tools():
+    """Sidebar password change for the signed-in user."""
     user = st.session_state.get("auth_user")
-    if not user: return
-    with st.expander("🔄 Change your password"):
+    if not user:
+        return
+    with st.sidebar.expander("🔐 Change your password", expanded=False):
         with st.form("pw_change"):
             pw1 = st.text_input("New password", type="password")
             pw2 = st.text_input("Confirm new password", type="password")
@@ -210,6 +239,6 @@ def password_tools():
         if go:
             if not pw1 or pw1 != pw2:
                 st.error("Passwords must match."); st.stop()
-            new_hash = Hasher.hash(pw1)
+            new_hash = stauth.Hasher([pw1]).generate()[0]
             update_password(user["email"], new_hash)
             st.success("Password updated.")

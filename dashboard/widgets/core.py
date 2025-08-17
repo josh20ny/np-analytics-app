@@ -1,95 +1,122 @@
-import io
+# dashboard/widgets/core.py
+from __future__ import annotations
+import re
 import pandas as pd
 import streamlit as st
-from pandas.api.types import is_numeric_dtype, is_datetime64_any_dtype, is_object_dtype
-from datetime import datetime, time
+from pandas.api.types import (
+    is_datetime64_any_dtype,
+    is_datetime64tz_dtype,
+    is_object_dtype,
+    is_numeric_dtype,
+)
 from data import read_sql
 
-def _download_button(df: pd.DataFrame, label: str, filename: str):
-    buf = io.StringIO()
-    df.to_csv(buf, index=False)
-    st.download_button(label, buf.getvalue(), file_name=filename, mime="text/csv")
+DATEISH_COLUMNS = {
+    "date", "week_start", "week_end",
+    "published_at", "last_seen", "observed_none_since", "expected_by",
+    "created_at", "updated_at", "verified_at",
+}
 
-def _format_date_series(s: pd.Series) -> pd.Series:
-    s = pd.to_datetime(s, errors="coerce")
-    return s.dt.strftime("%B ") + s.dt.day.astype(str) + s.dt.strftime(", %Y")
+# Regex: "YYYY-MM-DD" optionally followed by time and tz
+ISO_DT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?$"
+)
 
-def _format_display_dates(df: pd.DataFrame, exclude=("parsed_date",)) -> pd.DataFrame:
+def _fmt_month_day_year(s: pd.Series) -> pd.Series:
+    # Convert *anything* parseable to "August 10, 2025"
+    s = pd.to_datetime(s, errors="coerce", utc=False)
+    return (s.dt.strftime("%B ") + s.dt.day.astype("Int64").astype("string") + s.dt.strftime(", %Y")).astype("string")
+
+def _looks_like_iso(series: pd.Series) -> bool:
+    # Sample a few non-null stringified values for ISO-like pattern
+    sample = series.dropna().astype(str).head(30)
+    if sample.empty:
+        return False
+    hits = sample.map(lambda x: bool(ISO_DT_RE.match(x))).sum()
+    return (hits / len(sample)) >= 0.6
+
+def format_display_dates(df: pd.DataFrame, exclude=("parsed_date",)) -> pd.DataFrame:
+    """
+    Force all columns that are datetimes or look like datetimes
+    into 'Month D, YYYY' STRINGS for display.
+    """
     out = df.copy()
-    for c in out.columns:
+    cols = list(out.columns)
+
+    # 1) Force-format known columns by name
+    for col in (DATEISH_COLUMNS & set(cols)) - set(exclude):
+        out.loc[:, col] = _fmt_month_day_year(out[col])
+
+    # 2) Anything with datetime dtype (naive or tz-aware)
+    for c in cols:
+        if c in exclude:
+            continue
+        if is_datetime64_any_dtype(out[c]) or is_datetime64tz_dtype(out[c]):
+            out.loc[:, c] = _fmt_month_day_year(out[c])
+
+    # 3) Object columns that look like ISO dates/times
+    for c in cols:
         if c in exclude:
             continue
         col = out[c]
-        if is_numeric_dtype(col):
-            continue
-        if is_datetime64_any_dtype(col):
-            out.loc[:, c] = _format_date_series(col)
-            continue
-        if is_object_dtype(col):
-            non_null = col.notna().sum()
-            if non_null == 0:
-                continue
-            parsed = pd.to_datetime(col, errors="coerce", infer_datetime_format=True)
-            good_ratio = parsed.notna().sum() / non_null
-            if good_ratio >= 0.8:
-                years = parsed.dt.year.dropna()
-                if not years.empty and years.median() >= 1990:
-                    out.loc[:, c] = _format_date_series(parsed)
+        if is_object_dtype(col) and not is_numeric_dtype(col):
+            if _looks_like_iso(col):
+                out.loc[:, c] = _fmt_month_day_year(col)
+
     return out
 
-def ranged_table(table: str, date_col: str, key: str):
-    """Reusable raw-data table with a date range picker and CSV export."""
-    df_all = read_sql(f"SELECT * FROM {table}", parse_dates=[date_col])
-    st.subheader(f"Filtered rows from `{table}`")
-
-    if df_all.empty:
+def ranged_table(
+    table: str,
+    date_col: str,
+    key: str,
+    metric_col: str | None = None,
+    min_value: float | None = None,
+):
+    """Raw data slice with date-range picker + optional numeric threshold."""
+    df = read_sql(f"SELECT * FROM {table}", parse_dates=[date_col])
+    if df.empty:
         st.info("No data.")
         return
 
-    df_all["parsed_date"] = pd.to_datetime(df_all[date_col])
-    df_all = df_all.sort_values("parsed_date", ascending=False)
+    # Keep a working timestamp for filtering only (never shown)
+    df["parsed_date"] = pd.to_datetime(df[date_col], errors="coerce")
+    df = df.sort_values("parsed_date", ascending=False)
 
-    default_end = df_all["parsed_date"].iloc[0]
-    default_start = (
-        df_all["parsed_date"].iloc[9]
-        if len(df_all) >= 10 else df_all["parsed_date"].min()
-    )
+    default_end = df["parsed_date"].iloc[0]
+    default_start = df["parsed_date"].iloc[min(9, len(df) - 1)]
 
     start_date, end_date = st.date_input(
-        f"Select date range",
+        "Select date range",
         value=(default_start.date(), default_end.date()),
-        min_value=df_all["parsed_date"].min().date(),
+        min_value=df["parsed_date"].min().date(),
         max_value=default_end.date(),
-        key=f"{key}_date_range",
+        key=f"range_{key}",
     )
-    start_dt = datetime.combine(start_date, time.min)
-    end_dt = datetime.combine(end_date, time.max)
+    start_dt = pd.Timestamp.combine(pd.Timestamp(start_date), pd.Timestamp.min.time())
+    end_dt   = pd.Timestamp.combine(pd.Timestamp(end_date),   pd.Timestamp.max.time())
 
-    display_df = (
-        df_all[(df_all["parsed_date"] >= start_dt) & (df_all["parsed_date"] <= end_dt)]
-        .sort_values("parsed_date", ascending=False)
-        .copy()
-    )
+    df_filtered = df[(df["parsed_date"] >= start_dt) & (df["parsed_date"] <= end_dt)].copy()
 
-    # Format visible date-like columns for readability
-    display_df = _format_display_dates(display_df)
+    # Optional threshold filter (e.g., InsideOut > 50)
+    if metric_col and metric_col in df_filtered.columns and min_value is not None:
+        df_filtered = df_filtered[
+            pd.to_numeric(df_filtered[metric_col], errors="coerce").fillna(0) >= min_value
+        ]
 
-    # Optional: show parsed_date
-    show_parsed = st.checkbox("Show parsed_date", value=False, key=f"{key}_show_parsed")
-    if not show_parsed:
-        display_df = display_df.drop(columns=["parsed_date"], errors="ignore")
+    # 👉 Convert ALL date-ish columns to strings for display
+    display_df = format_display_dates(df_filtered, exclude=("parsed_date",))
+
+    # Always hide the helper column from the table
+    display_df = display_df.drop(columns=["parsed_date"], errors="ignore")
 
     if display_df.empty:
-        st.warning("No rows with meaningful data in selected range.")
-        return
+        st.warning("No rows in selected range.")
+    else:
+        st.dataframe(display_df, use_container_width=True)
 
-    st.dataframe(display_df, use_container_width=True)
-
-    # Averages row for numeric columns
-    numeric_cols = [c for c in display_df.columns if is_numeric_dtype(display_df[c])]
-    if numeric_cols:
-        avg_row = (display_df[numeric_cols].mean(numeric_only=True).to_frame().T)
-        avg_row.index = ["Averages"]
-        st.dataframe(avg_row, use_container_width=True)
-
-    _download_button(display_df, "⬇️ Download CSV", f"{table}_{start_date}_{end_date}.csv")
+        # Averages row (numeric columns only)
+        numeric_cols = display_df.select_dtypes(include="number").columns
+        if len(numeric_cols) > 0:
+            avg_row = display_df[numeric_cols].mean(numeric_only=True).to_frame().T
+            avg_row.index = ["Averages"]
+            st.dataframe(avg_row, use_container_width=True)

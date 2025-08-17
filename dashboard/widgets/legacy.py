@@ -1,59 +1,54 @@
 import streamlit as st
+import altair as alt
 import matplotlib.pyplot as plt
 import pandas as pd
 from datetime import datetime
 
 
 def overlay_years_chart(df: pd.DataFrame, title: str):
-    """
-    Interactive line chart overlaying each year for the metric 'value'.
-    Uses a unique key for the multiselect to avoid duplicate IDs.
-    """
-    st.subheader(title)
-
-    # 1) pick which years to overlay
-    years = sorted(df['year'].unique())
-    pick = st.multiselect(
-        'Years to compare',
-        years,
-        default=years[-2:],
-        key=f"years_compare_{title.replace(' ', '_')}"
-    )
-    if not pick:
-        st.warning("Pick at least one year to compare.")
+    st.header(title)
+    if df is None or df.empty:
+        st.info("No data.")
         return
 
-    # 2) pivot into a year × week table
-    weekly = (
-        df
-        .groupby(['year','week'])['value']
-        .sum()
-        .unstack('year')
-        .fillna(0)
+    years_all = sorted([int(y) for y in df["year"].dropna().unique()])
+    default_years = years_all[-2:] or years_all
+    pick = st.multiselect("Years to compare", years_all, default=default_years, key=f"years_{title}")
+    if not pick:
+        st.warning("Pick at least one year.")
+        return
+
+    # Wide: week x year, then back to long for Altair
+    wide = df.groupby(["week", "year"])["value"].sum().unstack("year").fillna(0)
+    wide = wide[[y for y in pick if y in wide.columns]]
+    long = wide.reset_index().melt(id_vars="week", var_name="year", value_name="value")
+    long["year"] = long["year"].astype(str)
+
+    # Build a "date" for x-axis from the max date for each week in the latest picked year
+    baseline = max(pick)
+    map_df = (
+        df.loc[df["year"] == baseline, ["week", "date"]]
+        .assign(date_pd=pd.to_datetime(df.loc[df["year"] == baseline, "date"], errors="coerce"))
+        .groupby("week", as_index=True)["date_pd"].max()
     )
-    plot_df = weekly[pick]
+    long["date"] = long["week"].map(map_df)
+    # Fallback if any week missing
+    nan_mask = long["date"].isna()
+    if nan_mask.any():
+        long.loc[nan_mask, "date"] = pd.Timestamp(f"{baseline}-01-01") + pd.to_timedelta(long.loc[nan_mask, "week"] * 7, unit="D")
 
-    # 3) ensure we have a real datetime column to map from
-    if 'parsed_date' not in df.columns:
-        df['parsed_date'] = pd.to_datetime(df['date'], format='%B %d, %Y')
-
-    # 4) build a week → date map *only* from your baseline year
-    baseline = pick[-1]
-    date_map = (
-        df[df['year'] == baseline]
-          .groupby('week')['parsed_date']
-          .max()
+    chart = (
+        alt.Chart(long)
+        .mark_line(interpolate="monotone")
+        .encode(
+            x=alt.X("date:T", title=None),
+            y=alt.Y("value:Q", title=None),
+            color=alt.Color("year:N", title=None),
+            tooltip=["year:N", "week:Q", "value:Q"]
+        )
+        .properties(height=380)
     )
-
-    # 5) convert ISO week index → real datetime index
-    dt_index = date_map.reindex(plot_df.index)
-    plot_df.index = dt_index
-
-    # 6) drop any weeks without a match, then sort chronologically
-    plot_df = plot_df[~plot_df.index.isna()].sort_index()
-
-    # 7) hand it off to Streamlit (DatetimeIndex → proper time axis)
-    st.line_chart(plot_df, use_container_width=True)
+    st.altair_chart(chart, use_container_width=True)
 
 
 

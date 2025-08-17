@@ -136,3 +136,8 @@ TAB_CONFIG = {
          "args": {"title": "Lapsed (newly flagged)", "provider": get_lapsed_people, "limit": 100}},
     ],
 }
+
+# Per-tab raw table filters (applies only to the top "Filtered rows" table)
+TABLE_FILTERS = {
+    "InsideOut Attendance": {"metric_col": "total_attendance", "min_value": 50},
+}
