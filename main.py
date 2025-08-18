@@ -12,6 +12,7 @@ from app.planning_center.groups import router as pc_groups_router
 from app.planning_center.giving import router as pc_giving_router
 from app.planning_center.oauth_routes import router as pco_oauth_router
 from app.planning_center.people import router as people_router
+from app.planning_center.serving import router as serving_router
 from app.cadence import router as cadence_router
 
 
@@ -61,6 +62,7 @@ app.include_router(pc_groups_router)
 app.include_router(pc_giving_router)
 app.include_router(pco_oauth_router)
 app.include_router(people_router)
+app.include_router(serving_router)
 app.include_router(cadence_router)
 
 # ClickUp
