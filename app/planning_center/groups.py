@@ -210,7 +210,7 @@ def upsert_pco_groups(rows: List[Tuple[str, str, Optional[str], Optional[str], O
               campus_id       = COALESCE(pco_groups.campus_id, EXCLUDED.campus_id),
               created_at_pco  = COALESCE(pco_groups.created_at_pco, EXCLUDED.created_at_pco),
               updated_at_pco  = EXCLUDED.updated_at_pco,
-              is_serving_team = EXCLUDED.is_serving_team;
+              is_serving_team = pco_groups.is_serving_team OR EXCLUDED.is_serving_team;
             """,
             rows,
         )
@@ -255,10 +255,13 @@ def upsert_f_groups_memberships(rows: List[Tuple[str, str, str, Optional[datetim
 
 
 def _membership_status(attrs: dict) -> str:
-    status = (attrs.get("status") or "").lower()
-    if status == "active" and not attrs.get("archived_at") and not attrs.get("ended_at"):
-        return "active"
-    return "inactive"
+    """
+    Treat a membership as ACTIVE if it has not been ended/archived.
+    Do NOT trust `attributes.status` text – it’s not consistent for our needs.
+    """
+    archived_at = attrs.get("archived_at")
+    ended_at    = attrs.get("ended_at")
+    return "active" if not archived_at and not ended_at else "inactive"
 
 
 @router.get("/sync", response_model=dict)  # ← add this back

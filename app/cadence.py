@@ -23,9 +23,11 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/analytics/cadence", tags=["Analytics"])
 
 # Add near other constants
-MIN_SAMPLES_FOR_BUCKET = 4
+MIN_SAMPLES_FOR_BUCKET = 2
 DEFAULT_ROLLING_DAYS = 180
 LAPSE_CYCLES_THRESHOLD = 3
+REGULAR_MIN_SAMPLES = 2   
+
 
 
 # ─────────────────────────────
@@ -82,11 +84,24 @@ def _nearest_bucket(median_days: Optional[int]) -> str:
 
 def _calc_stats(dates: Sequence[date]) -> CadenceStats:
     uniq = sorted(set(dates))
+    if len(uniq) == 0:
+        # We don't upsert rows with 0 samples, but keep this safe.
+        return CadenceStats(0, None, None, "none")
+    if len(uniq) == 1:
+        # Exactly one event in the window → explicitly one_off
+        return CadenceStats(1, None, None, "one_off")
+
     gaps = _days_between(uniq)
-    if len(uniq) <= 1:
-        return CadenceStats(len(uniq), None, None, "irregular")
     med = int(round(median(gaps))) if gaps else None
+
+    # If the median gap is > 42 days, that's truly "irregular"
+    if med is not None and med > 42:
+        return CadenceStats(len(uniq), med, _iqr(gaps), "irregular")
+
+    # Otherwise, snap to the nearest standard bucket
     return CadenceStats(len(uniq), med, _iqr(gaps), _nearest_bucket(med))
+
+
 
 def _bucket_days(name: str) -> int:
     return {"weekly": 7, "biweekly": 14, "monthly": 30, "6weekly": 42}.get(name, 28)
@@ -288,7 +303,8 @@ def _fetch_group_active_asof(as_of: date) -> Dict[str, bool]:
             FROM f_groups_memberships m
             JOIN pco_groups g ON g.group_id = m.group_id
             WHERE COALESCE(g.group_type,'') ILIKE 'Groups'
-              AND m.first_joined_at::date <= %s
+              AND m.status = 'active'
+              AND (m.first_joined_at IS NULL OR m.first_joined_at::date <= %s)
               AND (m.archived_at IS NULL OR m.archived_at::date > %s)
             GROUP BY m.person_id;
             """,
@@ -297,6 +313,26 @@ def _fetch_group_active_asof(as_of: date) -> Dict[str, bool]:
         return {pid: True for (pid, _active) in cur.fetchall()}
     finally:
         cur.close(); conn.close()
+
+def _fetch_serving_active_asof(as_of: date) -> Dict[str, bool]:
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT m.person_id
+            FROM f_groups_memberships m
+            JOIN pco_groups g ON g.group_id = m.group_id
+            WHERE g.is_serving_team = TRUE
+              AND m.status = 'active'
+              AND (m.first_joined_at IS NULL OR m.first_joined_at::date <= %s)
+              AND (m.archived_at IS NULL OR m.archived_at::date > %s);
+            """,
+            (as_of, as_of),
+        )
+        return {pid: True for (pid,) in cur.fetchall()}
+    finally:
+        cur.close(); conn.close()
+
 
 # ─────────────────────────────
 # Cadence builders
@@ -315,47 +351,59 @@ def _build_rows_for_signal(
 ) -> List[Tuple]:
     """
     Convert events -> person_cadence rows (see upsert_person_cadence signature).
-    Enforces:
-      - last 6 months (handled by fetchers)
-      - MIN_SAMPLES_FOR_BUCKET guard
-      - missed_cycles & expected_next_date at 'as_of'
+    Rules:
+      - skip 0-sample people (no row)
+      - 1 sample => bucket 'one_off' (no expected_next, missed=0)
+      - >=2 samples: if median_days > 42 => 'irregular' (no expected_next, missed=0)
+                     else map to nearest standard bucket ('weekly','biweekly','monthly','6weekly')
     """
     rows: List[Tuple] = []
+
     for pid, dates in person_events.items():
         stats = _calc_stats(dates)
+        if stats.samples_n == 0:
+            continue
+
         last_seen = max(dates) if dates else None
 
-        # Low-sample guard
-        if stats.samples_n < MIN_SAMPLES_FOR_BUCKET:
-            bucket = "irregular"
+        # Choose bucket + stats to persist
+        if stats.samples_n == 1:
+            bucket = "one_off"
             median_days = None
-            iqr = None
+            iqr_days = None
         else:
-            bucket = stats.bucket
             median_days = stats.median_days
-            iqr = stats.iqr_days
+            iqr_days = stats.iqr_days
+            if median_days is not None and median_days > 42:
+                bucket = "irregular"
+            else:
+                bucket = stats.bucket  # one of weekly|biweekly|monthly|6weekly
 
-        # Expectations & lapses
-        expected = None
-        if last_seen and bucket != "irregular":
+        # Only real cadence buckets get expected/missed
+        if last_seen and bucket not in ("irregular", "one_off"):
             expected = last_seen + timedelta(days=_bucket_days(bucket))
-        missed = _missed_cycles(last_seen, bucket, as_of)
+            missed = _missed_cycles(last_seen, bucket, as_of)
+        else:
+            expected = None
+            missed = 0
 
         rows.append((
             pid,
             signal,
             median_days,
-            iqr,
+            iqr_days,
             expected,
             last_seen,
-            0,           # current_streak (can add later)
-            missed,      # missed_cycles drives “lapsed”
+            0,            # current_streak (reserved)
+            missed,       # drives “lapsed” detection for cadence signals
             bucket,
             stats.samples_n,
             "event_intervals_v2",
-            None,        # campus_id
+            None,         # campus_id
         ))
+
     return rows
+
 
 
 def rebuild_person_cadence(
@@ -494,6 +542,38 @@ def _attended_adults_for_week(week_start: date, week_end: date) -> Dict[str, int
 def _group_active_for_week(week_end: date) -> Dict[str, bool]:
     return _fetch_group_active_asof(week_end)
 
+def _asof_counts(week_end: date) -> dict:
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            WITH grp AS (
+              SELECT COUNT(DISTINCT m.person_id) AS n
+              FROM f_groups_memberships m
+              JOIN pco_groups g ON g.group_id = m.group_id
+              WHERE COALESCE(g.group_type,'') = 'Groups'
+                AND (m.first_joined_at IS NULL OR m.first_joined_at::date <= %s)
+                AND (m.archived_at   IS NULL OR m.archived_at::date   >  %s)
+            ),
+            srv AS (
+              SELECT COUNT(DISTINCT m.person_id) AS n
+              FROM f_groups_memberships m
+              JOIN pco_groups g ON g.group_id = m.group_id
+              WHERE g.is_serving_team = TRUE
+                AND (m.first_joined_at IS NULL OR m.first_joined_at::date <= %s)
+                AND (m.archived_at   IS NULL OR m.archived_at::date   >  %s)
+            )
+            SELECT (SELECT n FROM grp) AS groups_active,
+                   (SELECT n FROM srv) AS serving_active;
+            """,
+            (week_end, week_end, week_end, week_end),
+        )
+        ga, sa = cur.fetchone()
+        return {"in_groups_active": int(ga or 0), "serving_active": int(sa or 0)}
+    finally:
+        cur.close(); conn.close()
+
+
 def build_weekly_snapshot(db: Session, *, week_end: date, ensure_cadence: bool = True):
     """ Build snap_person_week for a target week (default: last Sunday CST). """
     if ensure_cadence:
@@ -512,6 +592,7 @@ def build_weekly_snapshot(db: Session, *, week_end: date, ensure_cadence: bool =
     attended = _attended_adults_for_week(week_start, week_end)
     gave_ontrack = _ontrack_give_for_week(week_start, week_end)
     group_active = _group_active_for_week(week_end)
+    serving_active = _fetch_serving_active_asof(week_end)
 
     conn = get_conn(); cur = conn.cursor()
     try:
@@ -523,21 +604,21 @@ def build_weekly_snapshot(db: Session, *, week_end: date, ensure_cadence: bool =
     finally:
         cur.close(); conn.close()
 
-    person_ids = set(attended.keys()) | set(gave_ontrack.keys()) | set(group_active.keys()) | set(gifts_now.keys())
+    person_ids = set(attended) | set(gave_ontrack) | set(group_active) | set(serving_active) | set(gifts_now)
 
     rows: List[Tuple] = []
     for pid in person_ids:
         att_cnt = attended.get(pid, 0)
         att_bool = att_cnt > 0
         give_on = gave_ontrack.get(pid, True)   # default to True if unknown / not due
-        serve_on = False                        # placeholder until serving cadence is wired
-        group_on = group_active.get(pid, False)
+        served_on = bool(serving_active.get(pid))
+        group_on   = bool(group_active.get(pid))
 
-        engaged_tier = int(give_on) + int(serve_on) + int(group_on)
+        engaged_tier = int(give_on) + int(served_on) + int(group_on)
 
         rows.append((
             pid, week_start, week_end,
-            att_bool, give_on, serve_on, group_on,
+            att_bool, give_on, served_on, group_on,
             engaged_tier, att_cnt, gifts_now.get(pid, 0), 0,
             None
         ))
@@ -569,6 +650,13 @@ def _avg_adult_attendance_last4(week_end: date) -> Optional[float]:
         cur.close(); conn.close()
 
 def _front_door_counts_for_week(week_start: date, week_end: date) -> Tuple[int,int,int,int]:
+    """
+    First-ever events (lifetime minimum date) whose first date falls inside the week:
+      • checkins: first svc_date in f_checkins_person
+      • giving:   first week_end with gift_count > 0 in f_giving_person_week
+      • groups:   first first_joined_at among groups with group_type ILIKE 'Groups'
+      • serving:  first first_joined_at among groups flagged is_serving_team = TRUE
+    """
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute(
@@ -589,20 +677,28 @@ def _front_door_counts_for_week(week_start: date, week_end: date) -> Tuple[int,i
               JOIN pco_groups g ON g.group_id = m.group_id
               WHERE COALESCE(g.group_type,'') ILIKE 'Groups'
               GROUP BY 1
+            ),
+            first_serving AS (
+              SELECT m.person_id, MIN(m.first_joined_at::date) AS first_dt
+              FROM f_groups_memberships m
+              JOIN pco_groups g ON g.group_id = m.group_id
+              WHERE g.is_serving_team = TRUE
+              GROUP BY 1
             )
             SELECT
               (SELECT COUNT(*) FROM first_checkins WHERE first_dt BETWEEN %s AND %s) AS first_time_checkins,
               (SELECT COUNT(*) FROM first_gifts    WHERE first_dt BETWEEN %s AND %s) AS first_time_givers,
               (SELECT COUNT(*) FROM first_groups   WHERE first_dt BETWEEN %s AND %s) AS first_time_groups,
-              0 AS first_time_serving -- placeholder until serving is wired
+              (SELECT COUNT(*) FROM first_serving  WHERE first_dt BETWEEN %s AND %s) AS first_time_serving
             ;
             """,
-            (week_start, week_end, week_start, week_end, week_start, week_end)
+            (week_start, week_end, week_start, week_end, week_start, week_end, week_start, week_end)
         )
         cks, gvs, grps, srv = cur.fetchone()
         return int(cks), int(gvs), int(grps), int(srv)
     finally:
         cur.close(); conn.close()
+
 
 def _upsert_front_door_weekly(week_start: date, week_end: date, counts: Tuple[int,int,int,int]) -> int:
     cks, gvs, grps, srv = counts
@@ -628,47 +724,99 @@ def _upsert_front_door_weekly(week_start: date, week_end: date, counts: Tuple[in
     finally:
         cur.close(); conn.close()
 
+def _count_serving_active_asof(as_of: date) -> int:
+    """
+    Distinct people actively serving as of `as_of` (Sunday),
+    based on serving-team memberships that are active at that date.
+    """
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT m.person_id)
+            FROM f_groups_memberships m
+            JOIN pco_groups g ON g.group_id = m.group_id
+            WHERE g.is_serving_team = TRUE
+              AND m.status = 'active'
+              AND (m.first_joined_at IS NULL OR m.first_joined_at::date <= %s)
+              AND (m.archived_at   IS NULL OR m.archived_at::date   >  %s)
+            ;
+            """,
+            (as_of, as_of),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    finally:
+        cur.close(); conn.close()
+
 # ─────────────────────────────
 # Buckets & Lapse Events helpers
 # ─────────────────────────────
 
-def _bucket_counts(signal: str, *, exclude_lapsed: bool = True) -> dict:
+def _bucket_counts(
+    signal: str,
+    *,
+    week_end: date,
+    exclude_lapsed: bool = True,
+) -> dict:
     """
-    Return {weekly, biweekly, monthly, 6weekly, irregular} counts for a signal
-    (attendance/giving/serve). By default excludes lapsed (missed_cycles >= 3).
+    Return counts for cadence buckets among people present in the weekly snapshot:
+    {weekly, biweekly, monthly, 6weekly, irregular, one_off}.
+
+    NOTE: This *does not* include zero-sample people (we never wrote rows for them).
+    If exclude_lapsed=True, we drop people whose cadence bucket is a real cadence
+    AND missed_cycles >= 3.
     """
     conn = get_conn(); cur = conn.cursor()
     try:
+        sql = """
+        WITH candidates AS (
+          SELECT pc.bucket
+          FROM person_cadence pc
+          JOIN snap_person_week s
+            ON s.person_id = pc.person_id
+           AND s.week_end  = %s
+          WHERE pc.signal = %s
+        )
+        SELECT bucket, COUNT(*)::int
+        FROM candidates
+        {where_exclude}
+        GROUP BY bucket;
+        """
+
+        where_exclude = ""
+        params = [week_end, signal]
+
         if exclude_lapsed:
-            cur.execute(
-                """
-                SELECT bucket, COUNT(*)::int
-                FROM person_cadence
-                WHERE signal = %s
-                  AND NOT (bucket <> 'irregular' AND missed_cycles >= 3)
-                GROUP BY bucket;
-                """,
-                (signal,)
+            # exclude only real cadence buckets that have missed >= 3
+            sql = """
+            WITH candidates AS (
+              SELECT pc.person_id, pc.bucket
+              FROM person_cadence pc
+              JOIN snap_person_week s
+                ON s.person_id = pc.person_id
+               AND s.week_end  = %s
+              WHERE pc.signal = %s
             )
-        else:
-            cur.execute(
-                """
-                SELECT bucket, COUNT(*)::int
-                FROM person_cadence
-                WHERE signal = %s
-                GROUP BY bucket;
-                """,
-                (signal,)
-            )
+            SELECT c.bucket, COUNT(*)::int
+            FROM candidates c
+            JOIN person_cadence pc ON pc.person_id = c.person_id AND pc.signal = %s
+            WHERE NOT (pc.bucket NOT IN ('irregular','one_off') AND pc.missed_cycles >= 3)
+            GROUP BY c.bucket;
+            """
+            params = [week_end, signal, signal]
+
+        cur.execute(sql, params)
         rows = cur.fetchall()
     finally:
         cur.close(); conn.close()
 
-    tpl = {"weekly": 0, "biweekly": 0, "monthly": 0, "6weekly": 0, "irregular": 0}
+    tpl = {"weekly": 0, "biweekly": 0, "monthly": 0, "6weekly": 0, "irregular": 0, "one_off": 0}
     for b, c in rows:
         if b in tpl:
             tpl[b] = int(c)
     return tpl
+
 
 
 def _insert_lapse_events(week_end: date, candidates: list[tuple]) -> list[dict]:
@@ -739,9 +887,30 @@ def _engaged_flag_for_signal_col(signal: str) -> str:
         "group":  "in_group_ontrack_bool",
     }[signal]
 
+def _engagement_counts_for_week(week_end: date) -> dict:
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT
+              SUM(CASE WHEN (gave_on::int + serving_on::int + in_group_on::int)=0 THEN 1 ELSE 0 END) AS engaged0,
+              SUM(CASE WHEN (gave_on::int + serving_on::int + in_group_on::int)=1 THEN 1 ELSE 0 END) AS engaged1,
+              SUM(CASE WHEN (gave_on::int + serving_on::int + in_group_on::int)=2 THEN 1 ELSE 0 END) AS engaged2,
+              SUM(CASE WHEN (gave_on::int + serving_on::int + in_group_on::int)=3 THEN 1 ELSE 0 END) AS engaged3
+            FROM person_engagement_weekly
+            WHERE week_end = %s;
+            """,
+            (week_end,),
+        )
+        e0, e1, e2, e3 = cur.fetchone()
+        return {"engaged0": e0 or 0, "engaged1": e1 or 0, "engaged2": e2 or 0, "engaged3": e3 or 0}
+    finally:
+        cur.close(); conn.close()
+
+
 def detect_and_write_lapses_for_week(
     week_end: date,
-    signals: tuple[str, ...] = ("attend","give","serve"),
+    signals: tuple[str, ...] = ("attend","give"),
     *,
     inactivity_days_for_drop: int = 180,
 ) -> dict:
@@ -761,76 +930,81 @@ def detect_and_write_lapses_for_week(
         cur.execute(
             """
             WITH pc AS (
-              SELECT person_id, signal, bucket, last_seen_date, expected_next_date, missed_cycles
-              FROM person_cadence
-              WHERE signal = ANY(%s) AND bucket <> 'irregular' AND missed_cycles >= 3
+            SELECT person_id, signal, bucket, samples_n, last_seen_date, expected_next_date, missed_cycles
+            FROM person_cadence
+            WHERE signal = ANY(%s)
+                AND samples_n >= 2
+                AND bucket NOT IN ('irregular','one_off')
+                AND missed_cycles >= 3
             ),
             base AS (
-              SELECT pc.*, s.engaged_tier,
-                     a.household_id,
-                     EXISTS (
-                       SELECT 1 FROM pco_people kid
-                       WHERE kid.household_id = a.household_id
-                         AND kid.birthdate IS NOT NULL
-                         AND kid.birthdate > %s::date - INTERVAL '14 years'
-                     ) AS has_kid_u14
-              FROM pc
-              LEFT JOIN pco_people a ON a.person_id = pc.person_id
-              LEFT JOIN snap_person_week s
-                     ON s.person_id = pc.person_id AND s.week_end = %s
+            SELECT pc.*, s.engaged_tier,
+                    a.household_id,
+                    EXISTS (
+                    SELECT 1 FROM pco_people kid
+                    WHERE kid.household_id = a.household_id
+                        AND kid.birthdate IS NOT NULL
+                        AND kid.birthdate > %s::date - INTERVAL '14 years'
+                    ) AS has_kid_u14
+            FROM pc
+            LEFT JOIN pco_people a ON a.person_id = pc.person_id
+            LEFT JOIN snap_person_week s
+                    ON s.person_id = pc.person_id AND s.week_end = %s
             ),
             eligible AS (
-              SELECT *
-              FROM base
-              WHERE
-                -- For non-attendance signals, no extra gating:
+            SELECT *
+            FROM base
+            WHERE
                 (signal <> 'attend')
-                -- For attendance: must be NOT engaged (tier 0) and still have kids < 14
                 OR (signal = 'attend' AND COALESCE(engaged_tier,0) = 0 AND has_kid_u14)
             ),
             first_time AS (
-              SELECT e.*
-              FROM eligible e
-              LEFT JOIN LATERAL (
+            SELECT e.*
+            FROM eligible e
+            LEFT JOIN LATERAL (
                 SELECT 1 FROM lapse_events le
                 WHERE le.person_id = e.person_id AND le.signal = e.signal
                 LIMIT 1
-              ) prev ON TRUE
-              WHERE prev IS NULL
+            ) prev ON TRUE
+            WHERE prev IS NULL
             )
             SELECT person_id, signal, bucket, last_seen_date, expected_next_date, missed_cycles
             FROM first_time
             """,
             (list(signals), week_end, week_end),
         )
+
         newly_rows = cur.fetchall()
 
         # Also compute ALL currently lapsed (after gating)
         cur.execute(
             """
             WITH pc AS (
-              SELECT person_id, signal
-              FROM person_cadence
-              WHERE signal = ANY(%s) AND bucket <> 'irregular' AND missed_cycles >= 3
+            SELECT person_id, signal
+            FROM person_cadence
+            WHERE signal = ANY(%s)
+                AND samples_n >= 2
+                AND bucket NOT IN ('irregular','one_off')
+                AND missed_cycles >= 3
             ),
             base AS (
-              SELECT pc.person_id, pc.signal, s.engaged_tier,
-                     a.household_id,
-                     EXISTS (
-                       SELECT 1 FROM pco_people kid
-                       WHERE kid.household_id = a.household_id
-                         AND kid.birthdate IS NOT NULL
-                         AND kid.birthdate > %s::date - INTERVAL '14 years'
-                     ) AS has_kid_u14
-              FROM pc
-              LEFT JOIN pco_people a ON a.person_id = pc.person_id
-              LEFT JOIN snap_person_week s
-                     ON s.person_id = pc.person_id AND s.week_end = %s
+            SELECT pc.person_id, pc.signal, s.engaged_tier,
+                    a.household_id,
+                    EXISTS (
+                    SELECT 1 FROM pco_people kid
+                    WHERE kid.household_id = a.household_id
+                        AND kid.birthdate IS NOT NULL
+                        AND kid.birthdate > %s::date - INTERVAL '14 years'
+                    ) AS has_kid_u14
+            FROM pc
+            LEFT JOIN pco_people a ON a.person_id = pc.person_id
+            LEFT JOIN snap_person_week s
+                    ON s.person_id = pc.person_id AND s.week_end = %s
             )
             SELECT signal, COUNT(*)::int
             FROM base
             WHERE signal <> 'attend'
-               OR (signal = 'attend' AND COALESCE(engaged_tier,0) = 0 AND has_kid_u14)
+            OR (signal = 'attend' AND COALESCE(engaged_tier,0) = 0 AND has_kid_u14)
             GROUP BY signal
             """,
             (list(signals), week_end, week_end),
@@ -843,7 +1017,7 @@ def detect_and_write_lapses_for_week(
         candidates = []
         for pid, sig, bucket, last_seen, expected, missed in newly_rows:
             exp = expected or (last_seen + timedelta(days=_bucket_days(bucket)) if last_seen and bucket else None)
-            obs = exp
+            obs = last_seen
             candidates.append((pid, sig, exp, obs, missed))
     finally:
         cur.close(); conn.close()
@@ -965,43 +1139,47 @@ def detect_and_write_lapses_for_week(
         },
     }
 
-def _count_total_lapsed_people(lapse_threshold: int = 3) -> int:
-    """
-    Unique people who are currently lapsed in ANY tracked signal (attend/give/serve),
-    excluding irregular buckets.
-    """
+def _count_total_lapsed_people(*, signals: Tuple[str, ...] = ("attend","give","serve"), lapse_threshold: int = 3) -> int:
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute(
             """
-            SELECT COUNT(DISTINCT person_id)
+            SELECT COUNT(DISTINCT person_id)::int
             FROM person_cadence
-            WHERE signal IN ('attend','give','serve')
-              AND bucket <> 'irregular'
+            WHERE signal = ANY(%s)
+              AND samples_n >= 2
+              AND bucket NOT IN ('irregular','one_off')
               AND missed_cycles >= %s
             """,
-            (lapse_threshold,),
+            (list(signals), lapse_threshold)
         )
-        return cur.fetchone()[0] or 0
+        (n,) = cur.fetchone()
+        return int(n or 0)
     finally:
         cur.close(); conn.close()
 
 
+
 def _fetch_newly_lapsed_aggregate(week_end: date) -> tuple[int, dict, list]:
+    """
+    People who FIRST reached missed_cycles = 3 in this week, by signal.
+    Only consider 'attend' and 'give' lapses (we no longer track 'serve' cadence).
+    """
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute(
             """
             SELECT e.person_id, e.signal, e.expected_by, e.observed_none_since, e.missed_cycles,
-                   pc.bucket,
+                   COALESCE(pc.bucket, 'irregular') AS bucket,
                    p.first_name, p.last_name, p.email
             FROM lapse_events e
             JOIN pco_people p ON p.person_id = e.person_id
             LEFT JOIN person_cadence pc
               ON pc.person_id = e.person_id AND pc.signal = e.signal
             WHERE e.week_flagged = %s
-              AND e.missed_cycles = 3         -- ⬅️ only first week hitting threshold
-            ORDER BY p.last_name, p.first_name, e.signal
+              AND e.missed_cycles = 3
+              AND e.signal IN ('attend','give')
+            ORDER BY p.last_name, p.first_name, e.signal;
             """,
             (week_end,),
         )
@@ -1009,7 +1187,7 @@ def _fetch_newly_lapsed_aggregate(week_end: date) -> tuple[int, dict, list]:
     finally:
         cur.close(); conn.close()
 
-    by_signal: dict[str,int] = {"attend": 0, "give": 0, "serve": 0}
+    by_signal: dict[str, int] = {"attend": 0, "give": 0}
     per_person: dict[str, dict] = {}
 
     for pid, sig, exp_by, none_since, missed, bucket, fn, ln, email in rows:
@@ -1024,20 +1202,19 @@ def _fetch_newly_lapsed_aggregate(week_end: date) -> tuple[int, dict, list]:
         per_person[pid]["lapsed"].append({
             "signal": sig,
             "bucket": bucket,
-            "expected_by": str(exp_by),
-            "observed_none_since": str(none_since),
+            "expected_by": str(exp_by) if exp_by else None,
+            "observed_none_since": str(none_since) if none_since else None,
             "missed_cycles": missed
         })
 
     items = list(per_person.values())
     return len(items), by_signal, items
 
-
-
 def _fetch_newly_no_longer_attends(week_end: date, inactivity_days: int = 180) -> list[dict]:
     """
     People who *first* crossed the 6-month inactivity threshold in this week
-    AND are Engaged 0 for week_end. Also returns first signal/profile date and last signal dates.
+    AND are Engaged 0 for week_end. Includes per-signal last dates and first_seen_any.
+    Engagement signals considered: attend, give, serve, group.
     """
     drop_before = week_end - timedelta(days=inactivity_days)
     prev_drop_before = week_end - timedelta(days=inactivity_days + 7)
@@ -1056,7 +1233,14 @@ def _fetch_newly_no_longer_attends(week_end: date, inactivity_days: int = 180) -
               GROUP BY person_id
             ),
             last_grp AS (
-              SELECT person_id, MAX(first_joined_at::date) AS last_group
+              -- If still active at week_end, treat last group activity as week_end; else archived_at
+              SELECT person_id,
+                     MAX(
+                       COALESCE(
+                         CASE WHEN archived_at IS NULL THEN %s::date ELSE archived_at::date END,
+                         NULL
+                       )
+                     ) AS last_group
               FROM f_groups_memberships
               GROUP BY person_id
             ),
@@ -1080,15 +1264,13 @@ def _fetch_newly_no_longer_attends(week_end: date, inactivity_days: int = 180) -
               SELECT gl.person_id, gl.last_any
               FROM greatest_last gl
               JOIN engaged0 e0 ON e0.person_id = gl.person_id
-              WHERE gl.last_any > %s  -- not already “dropped” last week
-                AND gl.last_any <= %s -- first time this week
+              WHERE gl.last_any > %s  -- not already “dropped” before last week
+                AND gl.last_any <= %s -- crosses the 180-day boundary this week
             )
             SELECT
               p.person_id, p.first_name, p.last_name, p.email,
               gl.last_any AS last_any_date,
-              -- provide per-signal lasts
               ls.last_attend, ls.last_give, ls.last_serve, lg.last_group,
-              -- first signal or profile created/first_seen
               (
                 SELECT MIN(x) FROM (VALUES
                   ((SELECT MIN(c.svc_date) FROM f_checkins_person c WHERE c.person_id = p.person_id)),
@@ -1103,9 +1285,9 @@ def _fetch_newly_no_longer_attends(week_end: date, inactivity_days: int = 180) -
             JOIN greatest_last gl ON gl.person_id = n.person_id
             LEFT JOIN ls ON ls.person_id = n.person_id
             LEFT JOIN last_grp lg ON lg.person_id = n.person_id
-            ORDER BY p.last_name, p.first_name
+            ORDER BY p.last_name, p.first_name;
             """,
-            (week_end, prev_drop_before, drop_before),
+            (week_end, week_end, prev_drop_before, drop_before),
         )
         rows = cur.fetchall()
     finally:
@@ -1119,16 +1301,14 @@ def _fetch_newly_no_longer_attends(week_end: date, inactivity_days: int = 180) -
             "email": email,
             "first_seen_any": (str(first_any) if first_any else None),
             "last_signals": {
-                "attend": (str(last_attend) if last_attend else None),
-                "give":   (str(last_give)   if last_give   else None),
-                "serve":  (str(last_serve)  if last_serve  else None),
-                "group":  (str(last_group)  if last_group  else None),
-                "last_any": (str(last_any) if last_any else None),
+                "attend":  (str(last_attend) if last_attend else None),
+                "give":    (str(last_give)   if last_give   else None),
+                "serve":   (str(last_serve)  if last_serve  else None),
+                "group":   (str(last_group)  if last_group  else None),
+                "last_any":(str(last_any)    if last_any    else None),
             }
         })
     return items
-
-
 
 # ─────────────────────────────
 # Routes
@@ -1136,14 +1316,44 @@ def _fetch_newly_no_longer_attends(week_end: date, inactivity_days: int = 180) -
 
 @router.get("/rebuild", response_model=dict)
 def api_rebuild_cadence(
-    signals: str = Query("give,attend,group", description="Comma list of signals: give,attend,group"),
-    since: Optional[str] = Query(None, description="Only consider events on/after this date (YYYY-MM-DD)"),
-    db: Session = Depends(get_db)
+    signals: str = Query("give,attend,group", description="Comma list: give, attend, group, serve"),
+    since: Optional[str] = Query(None, description="Only consider events on/after YYYY-MM-DD (for attend/give/group)"),
+    rolling_days: int = Query(DEFAULT_ROLLING_DAYS, ge=30, le=730, description="Rolling window for cadence stats"),
+    week_end: Optional[str] = Query(None, description="Sunday YYYY-MM-DD used for 'serve' (and any as-of counts)"),
+    db: Session = Depends(get_db),
 ):
+    # Parse inputs
     sigs = [s.strip().lower() for s in signals.split(",") if s.strip()]
     since_dt = date.fromisoformat(since) if since else None
-    totals = rebuild_person_cadence(db, since=since_dt, signals=sigs)
-    return {"status": "ok", "signals": sigs, "since": str(since_dt) if since_dt else None, **totals}
+    week_end_dt = date.fromisoformat(week_end) if week_end else get_last_sunday_cst()
+
+    # Only pass true cadence signals into the cadence builder
+    cadence_sigs = [s for s in sigs if s in ("attend", "give", "group")]
+
+    totals = {}
+    if cadence_sigs:
+        totals.update(
+            rebuild_person_cadence(
+                db,
+                since=since_dt,
+                signals=cadence_sigs,
+                rolling_days=rolling_days,
+            )
+        )
+
+    # New: serving is not a cadence; we return the active count as-of week_end
+    if "serve" in sigs:
+        totals["serve"] = _count_serving_active_asof(week_end_dt)
+
+    return {
+        "status": "ok",
+        "signals": sigs,
+        "since": str(since_dt) if since_dt else None,
+        "week_end": str(week_end_dt),
+        "rolling_days": rolling_days,
+        **totals,
+    }
+
 
 @router.get("/snap-week", response_model=dict)
 def api_snap_week(
@@ -1221,42 +1431,30 @@ def build_weekly_report(
     persist_front_door: bool = True,
     rolling_days: int = DEFAULT_ROLLING_DAYS,
 ) -> dict:
-    """
-    One-call weekly pipeline:
-      1) Rebuild cadences for attend, give, group (rolling window).
-      2) Build weekly snapshot rows (snap_person_week).
-      3) Bucket histograms for attend/give/serve (serve zeros until wired).
-      4) Front Door firsts (persist to front_door_weekly).
-      5) Engaged tier counts (from snapshot).
-      6) Detect & write first-time lapse events for attend/give/serve (returns list).
-      7) 4-week average adult attendance.
-    """
-    # Week window (Mon..Sun)
     if not week_end:
         week_end = get_last_sunday_cst()
     week_start, wk_end = week_bounds_for(week_end)
     assert wk_end == week_end
 
-    # 1) Rebuild cadences (rolling window; group is status-based)
-    rebuild_person_cadence(db, signals=("give","attend","group"), rolling_days=rolling_days,)
+    # 1) Rebuild cadences (attend, give; "group" is status-based but harmless to include)
+    rebuild_person_cadence(db, signals=("give", "attend", "group"), rolling_days=rolling_days)
 
-    # 2) Ensure snapshot
+    # 2) Ensure snapshot for this Sunday (if your snapshot supports giving lookback, pass 60 there)
     if ensure_snapshot:
         build_weekly_snapshot(db, week_end=week_end, ensure_cadence=False)
 
-    # 3) Buckets (exclude lapsed)
+    # 3) Cadence buckets (serve cadence removed)
     buckets = {
-        "attend": _bucket_counts("attend", exclude_lapsed=True),
-        "give":   _bucket_counts("give",   exclude_lapsed=True),
-        "serve":  _bucket_counts("serve",  exclude_lapsed=True),  # likely all zeros for now
+        "attend": _bucket_counts("attend", week_end=week_end, exclude_lapsed=True),
+        "give":   _bucket_counts("give",   week_end=week_end, exclude_lapsed=True),
     }
 
-    # 4) Front Door (persist)
+    # 4) Front Door
     fd_counts = _front_door_counts_for_week(week_start, week_end)
     if persist_front_door:
         _upsert_front_door_weekly(week_start, week_end, fd_counts)
 
-    # 5) Engaged tiers for the week
+    # 5) Engaged tiers directly from snapshot (no person_engagement_weekly table needed)
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute(
@@ -1276,60 +1474,63 @@ def build_weekly_report(
         "engaged0": tiers.get(0, 0),
         "engaged1": tiers.get(1, 0),
         "engaged2": tiers.get(2, 0),
-        "engaged3": tiers.get(3, 0),  # serve not yet wired
+        "engaged3": tiers.get(3, 0),
     }
 
     # 6) Lapses & no-longer-attends
     payload = detect_and_write_lapses_for_week(
         week_end,
-        signals=("attend","give","serve"),
+        signals=("attend","give"),  # groups excluded from “lapsed” logic
         inactivity_days_for_drop=180,
     )
-    all_lapsed_by_signal = payload.get("all_lapsed_counts", {})
+    new_lapsed_total_people = payload.get("new_total_people", 0)
+    new_lapsed_by_signal    = payload.get("new_by_signal", {})
+    all_lapsed_by_signal    = payload.get("all_lapsed_counts", {})  # current stock by signal
 
-    # Then shape the response
-    new_lapsed_total_people, new_lapsed_by_signal, newly_lapsed_items = _fetch_newly_lapsed_aggregate(week_end)
-    total_lapsed_people = _count_total_lapsed_people(lapse_threshold=3)
-    nla_added_items = _fetch_newly_no_longer_attends(week_end, inactivity_days=180)
+    # Items that *hit* threshold this week, split out for UI (attend vs give)
+    items_attend = [i for i in payload.get("items", []) if any(l["signal"]=="attend" for l in i["lapsed"])]
+    items_give   = [i for i in payload.get("items", []) if any(l["signal"]=="give"   for l in i["lapsed"])]
 
+    # Totals in stock, limited to the signals above and excluding irregular/one_off
+    total_lapsed_people = _count_total_lapsed_people(signals=("attend","give"), lapse_threshold=3)
 
     # 7) Average adult attendance (last 4 Sundays)
     avg4 = _avg_adult_attendance_last4(week_end)
 
+    asof = _asof_counts(week_end)
+
     return {
-            "week_start": str(week_start),
-            "week_end": str(week_end),
-            "cadence_buckets": buckets,
-            "engaged": engaged,
-            "front_door": {
-                "first_time_checkins": fd_counts[0],
-                "first_time_givers":   fd_counts[1],
-                "first_time_groups":   fd_counts[2],
-                "first_time_serving":  fd_counts[3],
-            },
-            "lapses": {
-                "new_this_week_total": new_lapsed_total_people,
-                "new_by_signal": new_lapsed_by_signal,
-                "total_lapsed_people": total_lapsed_people,
-                "all_lapsed_by_signal": all_lapsed_by_signal,  # ⬅️ now included
-                "items": newly_lapsed_items,  # only missed_cycles == 3
-            },
-            "no_longer_attends": {
-                # show only “added this week” and their details
-                "added_this_week": len(nla_added_items),
-                "items": nla_added_items,                         # has first_seen_any + per-signal last dates
-            },
-            "adult_attendance_avg_4w": avg4,
-            "notes": [
-                "Cadences computed over a rolling 180-day window; low samples (<4) => irregular.",
-                "Attendance lapses count only if Engaged tier == 0 AND household still has a child <14 (InsideOut excluded).",
-                "Lapsed = missed >= 3 cycles; items list shows only those hitting 3 missed cycles this week.",
-                "“No longer attends” = no engagement for 180 days; list shows only those added this week.",
-                "Serving cadence/buckets will populate once serving signals are wired.",
-            ],
-        }
-
-
+        "week_start": str(week_start),
+        "week_end": str(week_end),
+        "cadence_buckets": buckets,
+        "engaged": engaged,
+        "front_door": {
+            "first_time_checkins": fd_counts[0],
+            "first_time_givers":   fd_counts[1],
+            "first_time_groups":   fd_counts[2],
+            "first_time_serving":  fd_counts[3],
+        },
+        "lapses": {
+            "new_this_week_total": new_lapsed_total_people,
+            "new_by_signal": new_lapsed_by_signal,
+            "total_lapsed_people": total_lapsed_people,
+            "all_lapsed_by_signal": all_lapsed_by_signal,
+            "items_attend": items_attend,
+            "items_give": items_give,
+        },
+        "no_longer_attends": {
+            "added_this_week": len(_fetch_newly_no_longer_attends(week_end, inactivity_days=180)),
+            "items":           _fetch_newly_no_longer_attends(week_end, inactivity_days=180),
+        },
+        "as_of": asof,
+        "adult_attendance_avg_4w": avg4,
+        "notes": [
+            f"Cadences computed over a rolling {rolling_days}-day window; low samples (<4) => irregular.",
+            "Engaged tiers use snapshot booleans (giving + serving + in_group). Attendance isn’t part of the tier.",
+            "Lapsed = missed >= 3 cycles; items_* lists include those hitting 3 missed cycles this week.",
+            "“No longer attends” = no engagement for 180 days; list shows only those added this week.",
+        ],
+    }
 
 
 
@@ -1499,7 +1700,7 @@ def api_person_cadence(person_id: str, days: int = Query(180, ge=30, le=730)):
 def api_reset_cadence(
     confirm: str = Query(..., description="Must equal 'RESET-CADENCE'"),
     backfill: bool = Query(False, description="If true, (re)build multiple weeks"),
-    signals: str = Query("give,attend,group", description="Comma list: give,attend,group"),
+    signals: str = Query("give,attend", description="Comma list: give,attend,group"),
     start_date: Optional[date] = Query(None, description="YYYY-MM-DD; first Sunday on/after this date"),
     end_date: Optional[date] = Query(None, description="YYYY-MM-DD; last Sunday on/before this date"),
     db: Session = Depends(get_db),
@@ -1525,7 +1726,7 @@ def api_reset_cadence(
         # One-week rebuild (current week only)
         rebuild_person_cadence(db, signals=sigs, rolling_days=DEFAULT_ROLLING_DAYS, as_of=last_sun)
         build_weekly_snapshot(db, week_end=last_sun)
-        payload = detect_and_write_lapses_for_week(last_sun, signals=("attend","give","serve"), inactivity_days_for_drop=180)
+        payload = detect_and_write_lapses_for_week(last_sun, signals=("attend","give"), inactivity_days_for_drop=180)
         return {
             "status": "ok",
             "mode": "current_week_only",

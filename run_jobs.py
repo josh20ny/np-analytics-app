@@ -4,9 +4,16 @@ import json
 import requests
 
 from dotenv import load_dotenv
-from clickup_app.clickup_client import ClickUpService
+from app.db import get_db
+from fastapi import Depends
+#from clickup_app.clickup_client import ClickUpService
 from clickup_app.assistant_client import run_assistant_with_tools
-
+from clickup_app.clickup_client import (
+    post_message,
+    get_channel_members_map,
+    format_user_mention,
+    get_bot_user_id,     # ✅ import this
+)
 # Load environment variables
 load_dotenv()
 
@@ -76,8 +83,8 @@ def main():
     print("📝 Assistant summary generated")
 
     # Post the summary to ClickUp
-    clickup = ClickUpService()
-    clickup.send_message(summary)
+    Session = Depends(get_db)
+    post_message(Session, '45004558', '1axdre-98673', summary)
 
 
 if __name__ == "__main__":
