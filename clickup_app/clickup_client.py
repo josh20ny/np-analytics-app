@@ -3,7 +3,7 @@
 import requests
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, Iterable
 from functools import lru_cache
 import os
 
@@ -86,3 +86,71 @@ def get_channel_members_map(db, workspace_id: str, channel_id: str) -> dict[str,
             out[uid] = name
     return out
 
+# --- Direct Messages (DM) helpers --------------------------------------------
+
+def ensure_dm_channel(db: Session, workspace_id: str, member_user_ids: Iterable[str]) -> str:
+    """
+    Create (or return) a Direct Message channel between the bot user and the
+    provided member_user_ids. Returns the channel_id to use with post_message().
+    """
+    access_token = get_access_token(db, workspace_id)
+    bot_uid = get_bot_user_id(db, workspace_id)  # ensures bot is included
+    # de-dupe and coerce to str
+    uniq_ids = []
+    for uid in [bot_uid, *member_user_ids]:
+        s = str(uid)
+        if s and s not in uniq_ids:
+            uniq_ids.append(s)
+
+    url = f"{API_BASE}/workspaces/{workspace_id}/chat/channels/direct_message"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type":  "application/json",
+        "Accept":        "application/json",
+    }
+
+    # Primary payload. If ClickUp ever adjusts parameter naming on this experimental API,
+    # we can add a lightweight fallback – but start with the documented/most common shape.
+    payload = {"member_user_ids": uniq_ids}
+
+    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+    # Optional graceful fallback if their schema changes:
+    if resp.status_code == 400 and "member_user_ids" in (resp.text or "").lower():
+        # Try older/alternate key
+        alt_payload = {"member_ids": uniq_ids}
+        resp = requests.post(url, json=alt_payload, headers=headers, timeout=30)
+
+    resp.raise_for_status()
+    data = resp.json() or {}
+
+    # Accept a few likely shapes for safety.
+    channel_id = str(
+        data.get("id")
+        or (data.get("channel") or {}).get("id")
+        or data.get("channel_id")
+        or ""
+    )
+    if not channel_id:
+        raise RuntimeError(f"Create DM returned unexpected body: {data}")
+    return channel_id
+
+
+def send_dm(db: Session, workspace_id: str, to_user_ids: Iterable[str] | str,
+            content: str, *, content_format: str = "text/md"):
+    """
+    Create/resolve the DM channel and post a message to it.
+    to_user_ids: a single ClickUp user_id (str) or an iterable of user_ids
+                 (exclude the bot; we include it automatically).
+    """
+    if isinstance(to_user_ids, str):
+        to_ids = [to_user_ids]
+    else:
+        to_ids = list(to_user_ids)
+
+    channel_id = ensure_dm_channel(db, workspace_id, to_ids)
+    # Reuse existing poster
+    return post_message(db, workspace_id, channel_id, content,
+                        msg_type="message", content_format=content_format)
+
+# Friendly alias
+post_dm = send_dm

@@ -1310,6 +1310,80 @@ def _fetch_newly_no_longer_attends(week_end: date, inactivity_days: int = 180) -
         })
     return items
 
+def _fetch_all_lapsed_people(
+    week_end: date,
+    *,
+    signals: Tuple[str, ...] = ("attend", "give"),
+    min_samples: int = REGULAR_MIN_SAMPLES,
+    lapse_threshold: int = LAPSE_CYCLES_THRESHOLD,
+) -> list[dict]:
+    """
+    All people who are currently considered 'lapsed' as-of week_end,
+    using the same ATTEND gating you use elsewhere:
+      • engaged_tier == 0 at week_end
+      • household has kids < 14
+    Only includes real cadence buckets (excludes irregular/one_off).
+    """
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            WITH pc AS (
+              SELECT person_id, signal, bucket, samples_n, missed_cycles
+              FROM person_cadence
+              WHERE signal = ANY(%s)
+                AND samples_n >= %s
+                AND bucket NOT IN ('irregular','one_off')
+                AND missed_cycles >= %s
+            ),
+            base AS (
+              SELECT pc.*, s.engaged_tier, a.household_id,
+                     EXISTS (
+                       SELECT 1 FROM pco_people kid
+                       WHERE kid.household_id = a.household_id
+                         AND kid.birthdate IS NOT NULL
+                         AND kid.birthdate > %s::date - INTERVAL '14 years'
+                     ) AS has_kid_u14
+              FROM pc
+              LEFT JOIN pco_people a ON a.person_id = pc.person_id
+              LEFT JOIN snap_person_week s
+                ON s.person_id = pc.person_id
+               AND s.week_end  = %s
+            ),
+            eligible AS (
+              SELECT *
+              FROM base
+              WHERE COALESCE(engaged_tier,0) = 0
+                AND has_kid_u14
+            ),
+            rollup AS (
+              SELECT e.person_id,
+                     ARRAY_AGG(DISTINCT e.signal) AS signals
+              FROM eligible e
+              GROUP BY e.person_id
+            )
+            SELECT p.person_id, p.first_name, p.last_name, p.email, r.signals
+            FROM rollup r
+            JOIN pco_people p ON p.person_id = r.person_id
+            ORDER BY p.last_name, p.first_name;
+            """,
+            (list(signals), min_samples, lapse_threshold, week_end, week_end),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close(); conn.close()
+
+    return [
+        {
+            "person_id": pid,
+            "name": f"{fn or ''} {ln or ''}".strip(),
+            "email": email,
+            "signals": list(sig_arr or []),
+        }
+        for (pid, fn, ln, email, sig_arr) in rows
+    ]
+
+
 # ─────────────────────────────
 # Routes
 # ─────────────────────────────
@@ -1517,6 +1591,7 @@ def build_weekly_report(
             "all_lapsed_by_signal": all_lapsed_by_signal,
             "items_attend": items_attend,
             "items_give": items_give,
+            "all_lapsed_people": _fetch_all_lapsed_people(week_end, signals=("attend","give")),  # ★ NEW
         },
         "no_longer_attends": {
             "added_this_week": len(_fetch_newly_no_longer_attends(week_end, inactivity_days=180)),
