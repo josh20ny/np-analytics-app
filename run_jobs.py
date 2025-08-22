@@ -1,132 +1,127 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# run_jobs.py (PATCH)
-# ─────────────────────────────────────────────────────────────────────────────
-import os, json, time, requests
-from datetime import datetime, timedelta
+# run_jobs.py
+import os, time, json, logging, requests
 from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
-from app.db import SessionLocal  # ADD: use real session, not Depends
+from app.db import SessionLocal
+from app.utils.common import get_last_sunday_cst
 from clickup_app.assistant_client import run_assistant_with_tools
-from clickup_app.clickup_client import post_message
-from clickup_app.clickup_client import send_dm  # ADD
+from clickup_app.clickup_client import post_message, send_dm
 
 load_dotenv()
 
-API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000")
+# ── Config ────────────────────────────────────────────────────────────────────
+BASE_URL                 = os.getenv("BASE_URL", "http://127.0.0.1:8000")
+WAKEUP_DELAY             = int(os.getenv("WAKEUP_DELAY", "10"))
+CLICKUP_WORKSPACE_ID     = os.getenv("CLICKUP_WORKSPACE_ID", "")
+CLICKUP_TEAM_CHANNEL_ID  = os.getenv("CLICKUP_TEAM_CHANNEL_ID", "")
+
+# Support either a single user var or comma list (back-compat with your envs)
+CLICKUP_JOSH_USER_ID     = os.getenv("CLICKUP_JOSH_USER_ID") or os.getenv("CLICKUP_JOSH_CHANNEL_ID", "")
+CLICKUP_DM_USER_IDS      = [s.strip() for s in os.getenv("CLICKUP_DM_USER_IDS", "").split(",") if s.strip()]
+if CLICKUP_JOSH_USER_ID and CLICKUP_JOSH_USER_ID not in CLICKUP_DM_USER_IDS:
+    CLICKUP_DM_USER_IDS.append(CLICKUP_JOSH_USER_ID)
+
 CENTRAL_TZ = ZoneInfo("America/Chicago")
 
-CLICKUP_WORKSPACE_ID    = os.getenv("CLICKUP_WORKSPACE_ID", "")
-CLICKUP_TEAM_CHANNEL_ID = os.getenv("CLICKUP_TEAM_CHANNEL_ID", "")
-# Comma-separated list → list[str]
-CLICKUP_DM_USER_IDS     = [s.strip() for s in os.getenv("CLICKUP_DM_USER_IDS", "").split(",") if s.strip()]
+# Keep your original working routes
+JOBS = [
+    ("/attendance/process-sheet",          "Adult attendance processing"),
+    ("/planning-center/checkins",          "Planning Center check-ins"),
+    ("/planning-center/giving/weekly-summary", "Planning Center Giving Summary"),
+    ("/planning-center/groups",            "Planning Center Groups"),
+    ("/planning-center/serving/summary",   "Planning Center Volunteer Summary"),
+    ("/youtube/weekly-summary",            "YouTube weekly summary"),
+    ("/youtube/livestreams",               "YouTube livestream tracking"),
+    ("/mailchimp/weekly-summary",          "Mailchimp weekly summary"),
+]
 
-def _get(url: str, label: str):
-    full = f"{API_BASE}{url}" if not url.startswith("http") else url
-    r = requests.get(full, timeout=60)
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+)
+log = logging.getLogger("run_jobs")
+
+# ── HTTP helpers ──────────────────────────────────────────────────────────────
+def call_job(endpoint: str, label: str, *, timeout: int = 300) -> str:
+    url = f"{BASE_URL.rstrip('/')}{endpoint}"
+    log.info("📡 Calling: %s – %s", url, label)
     try:
-        r.raise_for_status()
+        r = requests.get(url, timeout=timeout)
+        if r.status_code == 200:
+            log.info("✅ Finished: %s (200)", label)
+            return r.text or ""
+        log.error("❌ Failed: %s (%s) – %s", label, r.status_code, (r.text or "")[:300])
+        return ""
     except Exception as e:
-        raise RuntimeError(f"{label} failed: {e}\n↳ {r.text[:500]}")
+        log.exception("❌ Error calling %s: %s", label, e)
+        return ""
+
+def _json_or_empty(raw: str) -> dict:
     try:
-        return r.json()
-    except Exception:
-        return {"status": "ok", "raw_text": r.text}
+        return json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {"error": "invalid JSON", "raw": (raw or "")[:3000]}
 
-def _last_sunday_cst(now: datetime | None = None) -> str:
-    if not now:
-        now = datetime.now(CENTRAL_TZ)
-    d = now.date()
-    last_sun = d - timedelta(days=((d.weekday() + 1) % 7))
-    return last_sun.isoformat()
+# ── Cadence readiness polling (ensures DM has people lists) ───────────────────
+def fetch_cadence_report(last_sun: datetime.date, tries: int = 8, wait_s: int = 10) -> dict:
+    """Poll weekly-report until engaged/front_door/lapses appear (bounded)."""
+    qs = f"?week_end={last_sun.isoformat()}&ensure_snapshot=true&persist_front_door=true"
+    endpoint = f"/analytics/cadence/weekly-report{qs}"
+    for attempt in range(1, tries + 1):
+        raw = call_job(endpoint, "Cadence weekly-report")
+        data = _json_or_empty(raw)
+        if isinstance(data, dict) and data.get("engaged") and data.get("front_door") and data.get("lapses"):
+            log.info("✅ Cadence report ready on attempt %d", attempt)
+            return data
+        log.info("⏳ Cadence report not ready (attempt %d/%d) – waiting %ss", attempt, tries, wait_s)
+        time.sleep(wait_s)
+    log.warning("⚠️ Cadence report missing sections after %d attempts; proceeding with best effort.", tries)
+    return _json_or_empty(raw)
 
-# ── Weekly data collection (keep your current job calls; we also capture outputs) ──
-def collect_weekly_outputs() -> dict:
-    outputs = {}
+# ── Pipeline: facts first → cadence last (blocking) ───────────────────────────
+def run_weekly_pipeline():
+    last_sun = get_last_sunday_cst()
+    log.info("🗓️ Last Sunday (CST): %s", last_sun)
 
-    # 1) Adult Attendance (sheet → DB). If you have a read endpoint, use that instead.
-    try:
-        outputs["adult_attendance"] = _get("/attendance/process-sheet", "Adult Attendance")
-    except Exception as e:
-        outputs["adult_attendance_error"] = str(e)
-
-    # 2) Check-ins (Kids/Students) – use last Sunday explicitly
-    try:
-        last_sun = _last_sunday_cst()
-        outputs["checkins"] = _get(f"/planning-center/checkins?date={last_sun}", "Check-ins")
-    except Exception as e:
-        outputs["checkins_error"] = str(e)
-
-    # 3) Giving weekly summary (last full Mon..Sun)
-    try:
-        outputs["giving"] = _get("/planning-center/giving/weekly-summary", "Giving summary")
-    except Exception as e:
-        outputs["giving_error"] = str(e)
-
-    # 4) Volunteering / Serving
-    # Prefer weekly-summary if present, else sync response
-    try:
-        try:
-            outputs["serving"] = _get("/planning-center/serving/weekly-summary", "Serving weekly summary")
-        except Exception:
-            outputs["serving"] = _get("/planning-center/serving/sync", "Serving sync")
-    except Exception as e:
-        outputs["serving_error"] = str(e)
-
-    # 5) Groups (same pattern as serving)
-    try:
-        try:
-            outputs["groups"] = _get("/planning-center/groups/weekly-summary", "Groups weekly summary")
-        except Exception:
-            outputs["groups"] = _get("/planning-center/groups/sync", "Groups sync")
-    except Exception as e:
-        outputs["groups_error"] = str(e)
-
-    # 6) Cadence weekly report (engaged, front_door, buckets, lapses…)
-    try:
-        outputs["cadence"] = _get("/analytics/cadence/weekly-report?ensure_snapshot=true&persist_front_door=true", "Cadence weekly-report")
-    except Exception as e:
-        outputs["cadence_error"] = str(e)
-
-    # 7) YouTube weekly summary
-    try:
-        outputs["youtube"] = _get("/youtube/weekly-summary", "YouTube weekly summary")
-    except Exception as e:
-        outputs["youtube_error"] = str(e)
-
-    return outputs
-
-# ── TEAM: Build a strict-order Assistant prompt ───────────────────────────────
-def build_team_prompt(outputs: dict) -> str:
-    """
-    Order required by the user:
-      1) Adult Attendance Summary
-      2) Checkins (Kids & Students)
-      3) Giving Summary
-      4) Volunteering Summary
-      5) Groups Summary
-      6) Engaged Summary (cadence.engaged)
-      7) Front Door Summary (cadence.front_door)
-      8) YouTube Livestreams Summary
-    """
-    # Carefully extract the two cadence subsections if present
-    cadence = outputs.get("cadence") or {}
-    engaged = cadence.get("engaged") or {}
-    front_door = cadence.get("front_door") or {}
-
-    # We pass JSON blobs as sections to keep the Assistant grounded
-    sections = [
-        ("Adult Attendance Summary", outputs.get("adult_attendance")),
-        ("Check-ins (Kids & Students Attendance Summaries)", outputs.get("checkins")),
-        ("Giving Summary", outputs.get("giving")),
-        ("Volunteering Summary", outputs.get("serving")),
-        ("Groups Summary", outputs.get("groups")),
-        ("Engaged Summary", engaged or {"note": "no engaged data"}),
-        ("Front Door Summary", front_door or {"note": "no front door data"}),
-        ("YouTube Livestreams Summary", outputs.get("youtube")),
+    calls = [
+        ("/planning-center/people/sync",                 "People sync"),
+        ("/planning-center/groups/sync",                 "Groups/memberships sync"),
+        ("/planning-center/serving/sync",                "Serving teams/memberships sync"),
+        (f"/planning-center/checkins?date={last_sun}",   "Check-ins ingest (last Sunday)"),
+        ("/planning-center/giving/weekly-summary",       "Giving summary (last full week)"),
+        # Rebuild cadence for current window and snap this week
+        (f"/analytics/cadence/rebuild?signals=attend,give,group,serve&since={last_sun - timedelta(days=8)}&rolling_days=180&week_end={last_sun}",
+            "Cadence rebuild"),
+        (f"/analytics/cadence/snap-week?week_end={last_sun}", "Cadence snapshot"),
     ]
 
-    # Assistant instruction keeps tone concise and sectioned
+    for endpoint, label in calls:
+        _ = call_job(endpoint, label)
+        # small pacing to keep server comfy
+        time.sleep(1.5)
+
+    # Make sure we have a fully-populated weekly-report JSON before summaries/DMs
+    cadence = fetch_cadence_report(last_sun)
+    return cadence
+
+# ── Team prompt (strict order) ────────────────────────────────────────────────
+def build_team_prompt(outputs: dict, cadence: dict) -> str:
+    engaged     = cadence.get("engaged") or {}
+    front_door  = cadence.get("front_door") or {}
+
+    sections = [
+        ("Adult Attendance Summary",                           outputs.get("Adult attendance processing")),
+        ("Check-ins (Kids & Students Attendance Summaries)",   outputs.get("Planning Center check-ins")),
+        ("Giving Summary",                                     outputs.get("Planning Center Giving Summary")),
+        ("Volunteering Summary",                               outputs.get("Planning Center Volunteer Summary")),
+        ("Groups Summary",                                     outputs.get("Planning Center Groups")),
+        ("Engaged Summary",                                    engaged or {"note": "no engaged data"}),
+        ("Front Door Summary",                                 front_door or {"note": "no front door data"}),
+        ("YouTube Livestreams Summary",                        outputs.get("YouTube weekly summary")),
+    ]
     parts = [
         "You are NP Analytics’ reporting assistant.",
         "Compose a clear, concise weekly update for the team. Use the sections below in THIS EXACT ORDER.",
@@ -142,73 +137,93 @@ def build_team_prompt(outputs: dict) -> str:
         parts.append(f"### {title}\n```json\n{j}\n```")
     return "\n".join(parts)
 
-# ── DM: Build operational payloads (chunkable) ────────────────────────────────
+# ── DM payloads (chunk long people lists) ─────────────────────────────────────
 def _codeblock(obj) -> str:
     return "```json\n" + json.dumps(obj, ensure_ascii=False, indent=2) + "\n```"
 
-def build_dm_messages(outputs: dict) -> list[str]:
+def build_dm_messages(outputs: dict, cadence: dict) -> list[str]:
     msgs = []
-    # 1) Skipped Check-ins (from checkins-route)
-    chk = outputs.get("checkins") or {}
+
+    # Skipped Check-ins summary
+    chk = outputs.get("Planning Center check-ins") or {}
     skipped = chk.get("skipped") or (chk.get("debug") or {}).get("skipped")
     if skipped:
         msgs.append("**Skipped Check-ins (raw)**\n" + _codeblock(skipped))
 
-    # 2) Cadence Buckets
-    cad = outputs.get("cadence") or {}
-    buckets = cad.get("cadence_buckets")
+    # Cadence buckets
+    buckets = cadence.get("cadence_buckets")
     if buckets:
         msgs.append("**Cadence Buckets**\n" + _codeblock(buckets))
 
-    # 3) Lapses summary + people lists
-    lapses = cad.get("lapses")
+    # Lapses summary
+    lapses = cadence.get("lapses")
     if lapses:
         msgs.append("**Lapses Summary**\n" + _codeblock(lapses))
 
-    # 4) People printouts
-    # Try common keys that your cadence report tends to expose
-    newly_people = cad.get("newly") or cad.get("new_lapses") or cad.get("new_lapses_people")
-    all_lapsed = cad.get("all_lapsed_people") or cad.get("all_lapsed")
-    no_longer_attends = cad.get("no_longer_attends") or cad.get("no_longer_attends_people")
+    # People printouts
+    newly = lapses.get("items_attend", []) + lapses.get("items_give", []) if lapses else []
+    all_lapsed = (lapses or {}).get("all_lapsed_people") or []
+    nlas = (cadence.get("no_longer_attends") or {}).get("items") or []
 
-    def chunk_people(label, data):
-        if not data:
+    def chunk(label: str, people: list, size: int = 100):
+        if not people:
             return
-        # break into 100/person chunks so the message stays readable
-        batch = []
-        for i, person in enumerate(data, 1):
-            batch.append(person)
-            if i % 100 == 0:
-                msgs.append(f"**{label} (next 100)**\n" + _codeblock(batch))
-                batch = []
-        if batch:
-            msgs.append(f"**{label}**\n" + _codeblock(batch))
+        for i in range(0, len(people), size):
+            part = people[i:i+size]
+            msgs.append(f"**{label} (rows {i+1}–{i+len(part)})**\n" + _codeblock(part))
 
-    chunk_people("People: NEW lapses this week", newly_people)
-    chunk_people("People: ALL lapsed", all_lapsed)
-    chunk_people("People: NEW No Longer Attends", no_longer_attends)
+    chunk("People: NEW lapses this week", newly)
+    chunk("People: ALL lapsed", all_lapsed)
+    chunk("People: NEW No Longer Attends", nlas)
 
     return msgs
 
-# ── Main “weekly run” wrapper (minimal impact to your flow) ───────────────────
-def run_weekly():
-    outputs = collect_weekly_outputs()
+# ── Main ─────────────────────────────────────────────────────────────────────
+def main():
+    # Warm-up ping
+    try:
+        ping = requests.get(f"{BASE_URL.rstrip('/')}/docs", timeout=10)
+        log.info("🌐 Warm-up ping returned %s", ping.status_code)
+    except Exception:
+        log.info("⏱️ Waiting %ss for app to spin up…", WAKEUP_DELAY)
+        time.sleep(WAKEUP_DELAY)
 
-    # TEAM summary via Assistant
-    team_prompt = build_team_prompt(outputs)
-    summary_text = run_assistant_with_tools(team_prompt)
+    # 1) Pipeline (facts → cadence), returns fully-populated cadence weekly-report
+    cadence = run_weekly_pipeline()
 
+    # 2) Execute each job and collect raw JSON for the team & DM
+    outputs: dict[str, dict] = {}
+    for endpoint, label in JOBS:
+        raw = call_job(endpoint, label)
+        outputs[label] = _json_or_empty(raw)
+        time.sleep(1.0)
+
+    # 3) TEAM summary via Assistant (strict order)
+    team_prompt = build_team_prompt(outputs, cadence)
+    log.info("🧠 Assistant input:\n%s", team_prompt[:1000] + ("…" if len(team_prompt) > 1000 else ""))
+    summary = run_assistant_with_tools(team_prompt)
+    log.info("🧠 Assistant finished")
+
+    # 4) Post to ClickUp (team + DMs)
     with SessionLocal() as db:
         if CLICKUP_WORKSPACE_ID and CLICKUP_TEAM_CHANNEL_ID:
-            post_message(db, CLICKUP_WORKSPACE_ID, CLICKUP_TEAM_CHANNEL_ID, summary_text)
+            post_message(db, CLICKUP_WORKSPACE_ID, CLICKUP_TEAM_CHANNEL_ID, summary)
+            log.info("📤 Posted team summary to channel %s", CLICKUP_TEAM_CHANNEL_ID)
+        else:
+            log.warning("⚠️ Missing CLICKUP_WORKSPACE_ID or CLICKUP_TEAM_CHANNEL_ID; skipping team post.")
 
-        # DM(s) – raw/operational details
         if CLICKUP_WORKSPACE_ID and CLICKUP_DM_USER_IDS:
-            dm_messages = build_dm_messages(outputs)
+            dm_messages = build_dm_messages(outputs, cadence)
+            # Send as a small thread: first message creates the DM channel, rest follow
+            thread_started = False
             for msg in dm_messages:
                 send_dm(db, CLICKUP_WORKSPACE_ID, CLICKUP_DM_USER_IDS, msg)
-
-    return outputs  # keep the dict if you want to write it to disk/logs
+                if not thread_started:
+                    thread_started = True
+                time.sleep(0.5)
+            log.info("📤 Sent %d DM message(s) to %s", len(dm_messages), CLICKUP_DM_USER_IDS)
+        else:
+            log.info("ℹ️ No DM recipients configured; skipping DM.")
 
 if __name__ == "__main__":
-    run_weekly()
+    main()
