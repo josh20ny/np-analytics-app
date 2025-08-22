@@ -88,19 +88,27 @@ def get_channel_members_map(db, workspace_id: str, channel_id: str) -> dict[str,
 
 # --- Direct Messages (DM) helpers --------------------------------------------
 
+API_BASE = "https://api.clickup.com/api/v3"
+
 def ensure_dm_channel(db: Session, workspace_id: str, member_user_ids: Iterable[str]) -> str:
     """
-    Create (or return) a Direct Message channel between the bot user and the
-    provided member_user_ids. Returns the channel_id to use with post_message().
+    Create (or return) a Direct Message channel between the bot user and member_user_ids.
+    Returns the channel_id usable with post_message(...).
+    Accepts several possible response shapes from ClickUp's experimental v3 Chat API.
     """
     access_token = get_access_token(db, workspace_id)
-    bot_uid = get_bot_user_id(db, workspace_id)  # ensures bot is included
-    # de-dupe and coerce to str
-    uniq_ids = []
+    bot_uid = get_bot_user_id(db, workspace_id)
+
+    # de-dupe & coerce to strings
+    uniq_ids: list[str] = []
     for uid in [bot_uid, *member_user_ids]:
-        s = str(uid)
-        if s and s not in uniq_ids:
-            uniq_ids.append(s)
+        sid = str(uid).strip()
+        if sid and sid not in uniq_ids:
+            uniq_ids.append(sid)
+
+    if not uniq_ids or len(uniq_ids) < 2:
+        # A DM must include at least two members (bot + someone)
+        raise ValueError("ensure_dm_channel requires at least one recipient user_id.")
 
     url = f"{API_BASE}/workspaces/{workspace_id}/chat/channels/direct_message"
     headers = {
@@ -109,48 +117,58 @@ def ensure_dm_channel(db: Session, workspace_id: str, member_user_ids: Iterable[
         "Accept":        "application/json",
     }
 
-    # Primary payload. If ClickUp ever adjusts parameter naming on this experimental API,
-    # we can add a lightweight fallback – but start with the documented/most common shape.
     payload = {"member_user_ids": uniq_ids}
-
     resp = requests.post(url, json=payload, headers=headers, timeout=30)
-    # Optional graceful fallback if their schema changes:
+
+    # Fallback for older/alternate key if they ever change it again
     if resp.status_code == 400 and "member_user_ids" in (resp.text or "").lower():
-        # Try older/alternate key
         alt_payload = {"member_ids": uniq_ids}
         resp = requests.post(url, json=alt_payload, headers=headers, timeout=30)
 
     resp.raise_for_status()
     data = resp.json() or {}
 
-    # Accept a few likely shapes for safety.
+    # Normalize several possible shapes:
+    # { "data": { "id": "..." } }
+    # { "channel": { "id": "..." } }
+    # { "id": "..." }
+    # { "channel_id": "..." }
+    container = data.get("data") or data.get("channel") or data
     channel_id = str(
-        data.get("id")
-        or (data.get("channel") or {}).get("id")
+        (container or {}).get("id")
+        or (container or {}).get("channel_id")
+        or data.get("id")
         or data.get("channel_id")
         or ""
-    )
+    ).strip()
+
     if not channel_id:
+        # Helpful diagnostic without leaking tokens
         raise RuntimeError(f"Create DM returned unexpected body: {data}")
+
     return channel_id
 
 
-def send_dm(db: Session, workspace_id: str, to_user_ids: Iterable[str] | str,
-            content: str, *, content_format: str = "text/md"):
+def send_dm(
+    db: Session,
+    workspace_id: str,
+    to_user_ids: Iterable[str] | str,
+    content: str,
+    *,
+    content_format: str = "text/md",
+):
     """
-    Create/resolve the DM channel and post a message to it.
-    to_user_ids: a single ClickUp user_id (str) or an iterable of user_ids
-                 (exclude the bot; we include it automatically).
+    Resolve/create the DM channel and post a message to it.
+    to_user_ids may be a single user_id (str) or an iterable of user_ids (max supported by ClickUp DM).
     """
     if isinstance(to_user_ids, str):
         to_ids = [to_user_ids]
     else:
-        to_ids = list(to_user_ids)
+        to_ids = [str(x).strip() for x in to_user_ids if str(x).strip()]
 
     channel_id = ensure_dm_channel(db, workspace_id, to_ids)
-    # Reuse existing poster
-    return post_message(db, workspace_id, channel_id, content,
-                        msg_type="message", content_format=content_format)
+    # Reuse your existing poster
+    return post_message(db, workspace_id, channel_id, content, msg_type="message", content_format=content_format)
 
 # Friendly alias
 post_dm = send_dm
