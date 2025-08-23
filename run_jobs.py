@@ -213,9 +213,12 @@ def build_dm_messages(outputs: dict, cadence: dict) -> list[str]:
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
-    with SessionLocal() as db:
-        send_dm(db, CLICKUP_WORKSPACE_ID, CLICKUP_DM_USER_IDS, "DM smoke test ✅")
-
+    try:
+        with SessionLocal() as db:
+            db.execute("SELECT 1")
+        log.info("✅ DB connectivity OK")
+    except Exception as e:
+        log.error("❌ DB connectivity failed: %s", e)
     # Warm the app
     try:
         ping = requests.get(f"{BASE_URL.rstrip('/')}/docs", timeout=(5, 10))
@@ -262,18 +265,15 @@ def main():
         else:
             log.warning("⚠️ Missing CLICKUP_WORKSPACE_ID or CLICKUP_TEAM_CHANNEL_ID; skipping team post.")
 
-        # in main(), where we send DMs
-        if CLICKUP_WORKSPACE_ID and CLICKUP_DM_USER_IDS:
-            dm_messages = build_dm_messages(outputs, cadence)
-            for msg in dm_messages:
-                try:
+        try:
+            if CLICKUP_WORKSPACE_ID and CLICKUP_DM_USER_IDS:
+                dm_messages = build_dm_messages(outputs, cadence)
+                for msg in dm_messages:
                     send_dm(db, CLICKUP_WORKSPACE_ID, CLICKUP_DM_USER_IDS, msg)
                     time.sleep(0.5)
-                except Exception as e:
-                    log.error("DM post failed for a chunk: %s", e)
-            log.info("📤 Sent %d DM message(s) to %s", len(dm_messages), CLICKUP_DM_USER_IDS)
-        else:
-            log.info("ℹ️ No DM recipients configured; skipping DM.")
+                log.info("📤 Sent %d DM message(s)", len(dm_messages))
+        except Exception as e:
+            log.error("Skipping DMs due to DB/token error: %s", e)
 
 if __name__ == "__main__":
     main()
