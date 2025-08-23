@@ -11,7 +11,7 @@ from clickup_app.clickup_client import post_message, send_dm
 load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────────────
-BASE_URL                 = os.getenv("BASE_URL", "http://127.0.0.1:8000")
+BASE_URL                 = os.getenv("API_BASE_URL")
 WAKEUP_DELAY             = int(os.getenv("WAKEUP_DELAY", "10"))
 CLICKUP_WORKSPACE_ID     = os.getenv("CLICKUP_WORKSPACE_ID", "")
 CLICKUP_TEAM_CHANNEL_ID  = os.getenv("CLICKUP_TEAM_CHANNEL_ID", "")
