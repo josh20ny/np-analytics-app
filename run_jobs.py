@@ -3,6 +3,7 @@ import os, time, json, logging, requests
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta
 from sqlalchemy import text
+import math
 
 from dotenv import load_dotenv
 from app.db import SessionLocal
@@ -66,30 +67,55 @@ logging.basicConfig(
 )
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
+def warmup_base_url():
+    url = f"{BASE_URL.rstrip('/')}/docs"
+    max_attempts = int(os.getenv("WARMUP_RETRIES", "12"))  # ~1 min total
+    for i in range(max_attempts):
+        try:
+            r = requests.get(url, timeout=(5, 10))
+            if r.status_code == 200:
+                log.info("🌐 Warm-up OK (%s)", r.status_code)
+                return True
+            log.warning("🌐 Warm-up got %s (attempt %d/%d)", r.status_code, i+1, max_attempts)
+        except Exception as e:
+            log.warning("🌐 Warm-up error %s (attempt %d/%d)", e.__class__.__name__, i+1, max_attempts)
+        time.sleep(5)
+    log.error("🌐 Warm-up failed after %d attempts", max_attempts)
+    return False
+
 def call_job(endpoint: str, label: str, timeout_s: int | None = None) -> str:
-    """Call an API route and return its raw text response, with better timeouts and logs."""
     url = f"{BASE_URL.rstrip('/')}{endpoint}"
-    t0 = time.perf_counter()
     to = timeout_s or TIMEOUTS.get(label, 600)
-    # requests allows (connect, read) tuple; keep connect short, read long
     timeout = (10, to)
-    log.info("📡 Calling: %s – %s (timeout=%ss)", endpoint, label, to)
-    try:
-        r = requests.get(url, timeout=timeout)
-        elapsed = time.perf_counter() - t0
-        if r.status_code == 200:
-            log.info("✅ %s finished (%s) in %.1fs", label, r.status_code, elapsed)
-            return r.text or ""
-        log.error("❌ %s failed (%s) in %.1fs: %s", label, r.status_code, elapsed, (r.text or "")[:300])
-        return ""
-    except requests.ReadTimeout:
-        elapsed = time.perf_counter() - t0
-        log.error("⏱️ %s timed out after %.1fs (server may still be working)", label, elapsed)
-        return ""
-    except Exception as e:
-        elapsed = time.perf_counter() - t0
-        log.exception("💥 %s error after %.1fs", label, elapsed)
-        return ""
+
+    # Retry policy: up to 5 tries on 502/503/504 or connection errors
+    max_tries = 5
+    for attempt in range(1, max_tries + 1):
+        t0 = time.perf_counter()
+        log.info("📡 Calling: %s – %s (timeout=%ss try=%d/%d)", endpoint, label, to, attempt, max_tries)
+        try:
+            r = requests.get(url, timeout=timeout)
+            elapsed = time.perf_counter() - t0
+            if r.status_code == 200:
+                log.info("✅ %s finished (%s) in %.1fs", label, r.status_code, elapsed)
+                return r.text or ""
+            if r.status_code in (502, 503, 504):
+                log.warning("↩️ %s got %s in %.1fs, will retry", label, r.status_code, elapsed)
+                # jittered backoff: 0.5, 1, 2, 4, 8s
+                time.sleep(0.5 * (2 ** (attempt-1)))
+                continue
+            log.error("❌ %s failed (%s) in %.1fs: %s", label, r.status_code, elapsed, (r.text or "")[:300])
+            return ""
+        except (requests.ConnectionError, requests.ReadTimeout) as e:
+            elapsed = time.perf_counter() - t0
+            log.warning("↩️ %s connection error (%s) in %.1fs, will retry", label, e.__class__.__name__, elapsed)
+            time.sleep(0.5 * (2 ** (attempt-1)))
+        except Exception:
+            elapsed = time.perf_counter() - t0
+            log.exception("💥 %s unexpected error after %.1fs", label, elapsed)
+            return ""
+    log.error("❌ %s exhausted retries", label)
+    return ""
 
 def _json_or_empty(raw: str) -> dict:
     try:
@@ -215,12 +241,17 @@ def build_dm_messages(outputs: dict, cadence: dict) -> list[str]:
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
     # Warm the app
+    ok = warmup_base_url()
+    if not ok:
+        # optionally bail early or continue; continuing is fine since call_job retries
+        log.warning("Proceeding despite warm-up failure…")
+
     try:
-        ping = requests.get(f"{BASE_URL.rstrip('/')}/docs", timeout=(5, 10))
-        log.info("🌐 Warm-up ping %s", ping.status_code)
-    except Exception:
-        log.info("⏱️ Sleeping %ss while app spins up…", WAKEUP_DELAY)
-        time.sleep(WAKEUP_DELAY)
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
+        log.info("✅ DB connectivity OK")
+    except Exception as e:
+        log.error("❌ DB test query failed: %s", e)
 
     # 1) Run the pipeline (sequential, strict week window) → cadence dict
     cadence = run_weekly_pipeline()
