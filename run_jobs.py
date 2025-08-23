@@ -2,6 +2,7 @@
 import os, time, json, logging, requests
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta
+from sqlalchemy import text
 
 from dotenv import load_dotenv
 from app.db import SessionLocal
@@ -213,12 +214,6 @@ def build_dm_messages(outputs: dict, cadence: dict) -> list[str]:
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
-    try:
-        with SessionLocal() as db:
-            db.execute("SELECT 1")
-        log.info("✅ DB connectivity OK")
-    except Exception as e:
-        log.error("❌ DB connectivity failed: %s", e)
     # Warm the app
     try:
         ping = requests.get(f"{BASE_URL.rstrip('/')}/docs", timeout=(5, 10))

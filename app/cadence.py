@@ -1358,14 +1358,15 @@ def _fetch_all_lapsed_people(
             ),
             rollup AS (
               SELECT e.person_id,
-                     ARRAY_AGG(DISTINCT e.signal) AS signals
+                ARRAY_AGG(DISTINCT e.signal) AS signals,
+                MAX(e.missed_cycles) AS lapsed_cycles
               FROM eligible e
               GROUP BY e.person_id
             )
-            SELECT p.person_id, p.first_name, p.last_name, p.email, r.signals
+            SELECT p.person_id, p.first_name, p.last_name, p.email, r.signals, r.lapsed_cycles
             FROM rollup r
             JOIN pco_people p ON p.person_id = r.person_id
-            ORDER BY p.last_name, p.first_name;
+            ORDER BY r.lapsed_cycles ASC, p.last_name, p.first_name;
             """,
             (list(signals), min_samples, lapse_threshold, week_end, week_end),
         )
@@ -1379,8 +1380,10 @@ def _fetch_all_lapsed_people(
             "name": f"{fn or ''} {ln or ''}".strip(),
             "email": email,
             "signals": list(sig_arr or []),
+            "lapsed_cycles": int(lc) if lc is not None else None,
+            "lapsed_cycles_label": f"Lapsed Cycles: {int(lc)}" if lc is not None else "Lapsed Cycles: N/A",
         }
-        for (pid, fn, ln, email, sig_arr) in rows
+        for (pid, fn, ln, email, sig_arr, lc) in rows
     ]
 
 
