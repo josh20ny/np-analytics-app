@@ -1381,7 +1381,6 @@ def _fetch_all_lapsed_people(
             "email": email,
             "signals": list(sig_arr or []),
             "lapsed_cycles": int(lc) if lc is not None else None,
-            "lapsed_cycles_label": f"Lapsed Cycles: {int(lc)}" if lc is not None else "Lapsed Cycles: N/A",
         }
         for (pid, fn, ln, email, sig_arr, lc) in rows
     ]
