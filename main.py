@@ -5,7 +5,8 @@ from fastapi import FastAPI
 from app.google_sheets import router as sheets_router
 from app.attendance import router as attendance_router
 from app.mailchimp import router as mailchimp_router
-from app.debug.routes import router as debug_router
+
+
 
 # Planning Center
 from app.planning_center.checkins import router as pc_checkins_router
@@ -26,8 +27,9 @@ from clickup_app.oauth_routes import router as cu_oauth_router
 # YouTube
 from app.youtube.routes import router as youtube_router
 
-# (Optional) other routers if you have them:
+# (Optional) other routers:
 # from app.assistant.routes import router as assistant_router
+# from app.debug.routes import router as debug_router
 
 import logging, sys
 
@@ -75,4 +77,4 @@ app.include_router(youtube_router)
 
 # Optional extras if present
 # app.include_router(assistant_router)
-app.include_router(debug_router)
+# app.include_router(debug_router)

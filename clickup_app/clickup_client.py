@@ -92,37 +92,14 @@ API_BASE = "https://api.clickup.com/api/v3"
 
 # clickup_app/clickup_client.py  (DM helpers)
 
-def _dm_debug() -> bool:
-    return os.getenv("CLICKUP_DM_DEBUG", "0") == "1"
-
-def ensure_dm_channel(db: Session, workspace_id: str, member_user_ids: Iterable[str]) -> str:
-    access_token = get_access_token(db, workspace_id)
-    bot_uid = get_bot_user_id(db, workspace_id)
-
-    uniq_ids: list[str] = []
-    for uid in [bot_uid, *member_user_ids]:
-        sid = str(uid).strip()
-        if sid and sid not in uniq_ids:
-            uniq_ids.append(sid)
-    if len(uniq_ids) < 2:
-        raise ValueError("ensure_dm_channel requires at least one recipient user_id (besides the bot).")
-
-    url = f"{API_BASE}/workspaces/{workspace_id}/chat/channels/direct_message"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type":  "application/json",
+def _headers(token: str) -> dict:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type":  "application/json; charset=utf-8",
         "Accept":        "application/json",
     }
 
-    payload = {"member_user_ids": uniq_ids}
-    resp = requests.post(url, json=payload, headers=headers, timeout=30)
-
-    if resp.status_code == 400 and "member_user_ids" in (resp.text or "").lower():
-        resp = requests.post(url, json={"member_ids": uniq_ids}, headers=headers, timeout=30)
-
-    resp.raise_for_status()
-    data = resp.json() or {}
-
+def _normalize_channel_id(data: dict) -> str:
     container = data.get("data") or data.get("channel") or data
     channel_id = str(
         (container or {}).get("id")
@@ -131,21 +108,69 @@ def ensure_dm_channel(db: Session, workspace_id: str, member_user_ids: Iterable[
         or data.get("channel_id")
         or ""
     ).strip()
-    if not channel_id:
-        raise RuntimeError(f"Create DM returned unexpected body: {data}")
-
-    if _dm_debug():
-        print(f"[DM DEBUG] resolved channel_id={channel_id} for members={uniq_ids}")
-        # verify members
-        mem_url = f"{API_BASE}/workspaces/{workspace_id}/chat/channels/{channel_id}/members"
-        m = requests.get(mem_url, headers=headers, timeout=30)
-        try:
-            print(f"[DM DEBUG] members status={m.status_code} body={(m.json() if m.headers.get('content-type','').startswith('application/json') else m.text)}")
-        except Exception:
-            print(f"[DM DEBUG] members status={m.status_code} body={m.text[:400]}")
-
     return channel_id
 
+def _get_members(token: str, workspace_id: str, channel_id: str) -> list[str]:
+    url = f"{API_BASE}/workspaces/{workspace_id}/chat/channels/{channel_id}/members"
+    r = requests.get(url, headers=_headers(token), timeout=30)
+    try:
+        j = r.json()
+    except Exception:
+        return []
+    members = j.get("members") or j.get("data") or []
+    out: list[str] = []
+    for m in members:
+        uid = (
+            m.get("id")
+            or (m.get("user") or {}).get("id")
+            or (m.get("member") or {}).get("id")
+        )
+        if uid is not None:
+            out.append(str(uid))
+    return out
+
+def ensure_dm_channel(db: Session, workspace_id: str, member_user_ids: Iterable[str]) -> str:
+    """
+    Create (or resolve) a DM that includes the recipients you pass.
+    IMPORTANT: Do NOT include the bot user id; ClickUp includes the caller automatically.
+    Body must use 'user_ids' per v3 docs.
+    """
+    access_token = get_access_token(db, workspace_id)
+    bot_uid = str(get_bot_user_id(db, workspace_id))
+
+    # recipients only (exclude bot), de-dupe, limit ≤ 10
+    recips: list[str] = []
+    for uid in member_user_ids:
+        sid = str(uid).strip()
+        if sid and sid != bot_uid and sid not in recips:
+            recips.append(sid)
+    if not recips:
+        raise ValueError("ensure_dm_channel requires at least one non-bot recipient user_id.")
+    if len(recips) > 10:
+        raise ValueError("ClickUp direct_message supports up to 10 recipients.")
+
+    # Create/resolve the DM with the correct key: user_ids
+    url = f"{API_BASE}/workspaces/{workspace_id}/chat/channels/direct_message"
+    payload = {"user_ids": recips}
+    resp = requests.post(url, json=payload, headers=_headers(access_token), timeout=30)
+    resp.raise_for_status()
+
+    data = resp.json() if resp.headers.get("content-type","").startswith("application/json") else {}
+    channel_id = _normalize_channel_id(data)
+    if not channel_id:
+        raise RuntimeError(f"Create DM returned unexpected body: {resp.text}")
+
+    # Optional safety: verify recipients are actually members
+    have = set(_get_members(access_token, workspace_id, channel_id))
+    missing = [u for u in recips if u not in have]
+    if missing:
+        # Fail fast rather than silently posting into a bot-only DM
+        raise RuntimeError(
+            f"DM channel {channel_id} does not include recipients {missing}. "
+            f"Members present: {sorted(list(have))}. Payload sent: {payload}."
+        )
+
+    return channel_id
 
 def send_dm(
     db: Session,
@@ -155,10 +180,6 @@ def send_dm(
     *,
     content_format: str = "text/md",
 ) -> Tuple[str, dict]:
-    """
-    Resolve/create the DM channel and post a message to it.
-    Returns (channel_id, message_json)
-    """
     if isinstance(to_user_ids, str):
         to_ids = [to_user_ids]
     else:
@@ -166,33 +187,16 @@ def send_dm(
 
     channel_id = ensure_dm_channel(db, workspace_id, to_ids)
 
-    # Reuse your existing poster, but capture/return the message JSON for audit
-    access_token = get_access_token(db, workspace_id)
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type":  "application/json",
-        "Accept":        "application/json",
-    }
-    url = f"{API_BASE}/workspaces/{workspace_id}/chat/channels/{channel_id}/messages"
-    payload = {"content": content, "content_format": content_format, "type": "message"}
-
-    resp = requests.post(url, headers=headers, json=payload, timeout=30)
-    resp.raise_for_status()
-    msg = resp.json() if resp.headers.get("content-type","").startswith("application/json") else {"raw": resp.text}
-
-    if _dm_debug():
-        mid = (msg.get("data") or msg).get("id") if isinstance(msg, dict) else None
-        print(f"[DM DEBUG] posted message_id={mid} to channel_id={channel_id}")
-
-        # fetch last message to prove it landed
-        hist = requests.get(url, headers=headers, timeout=30)
-        try:
-            print(f"[DM DEBUG] recent messages status={hist.status_code} body={(hist.json() if hist.headers.get('content-type','').startswith('application/json') else hist.text)[:800]}")
-        except Exception:
-            print(f"[DM DEBUG] recent messages status={hist.status_code} body={hist.text[:400]}")
-
+    token = get_access_token(db, workspace_id)
+    post_url = f"{API_BASE}/workspaces/{workspace_id}/chat/channels/{channel_id}/messages"
+    body = {"content": content, "content_format": content_format, "type": "message"}
+    r = requests.post(post_url, json=body, headers=_headers(token), timeout=30)
+    r.raise_for_status()
+    try:
+        msg = r.json()
+    except Exception:
+        msg = {"raw": r.text}
     return channel_id, msg
 
-# Friendly alias
+# alias
 post_dm = send_dm
-
