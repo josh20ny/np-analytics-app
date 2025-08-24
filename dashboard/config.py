@@ -127,9 +127,24 @@ TAB_CONFIG = {
          "widget": stat_row,
          "args": {"title": "This Week", "provider": get_recent_engagement}},
 
-        {"loader": ("__service__", "ignored", None),
-         "widget": cadence_bars_v2,
-         "args": {"title": "Current Cadence Buckets", "provider": get_cadence_summary}},
+        {
+        "loader": ("__service__", "ignored", None),
+        "widget": cadence_bars_v2,
+        "args": {
+            "title": "Giving Cadence Buckets",
+            "provider": get_cadence_summary,
+            "signals": ("give",)
+        },
+        },
+        {
+        "loader": ("__service__", "ignored", None),
+        "widget": cadence_bars_v2,
+        "args": {
+            "title": "Attendance Cadence Buckets",
+            "provider": get_cadence_summary,
+            "signals": ("attend",)
+        },
+        },
 
         {"loader": ("__service__", "ignored", None),
          "widget": people_table,

@@ -2,6 +2,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 import altair as alt
+import math
 
 # 1) Metric strip for “This Week”
 def stat_row(title: str, provider, **kwargs):
@@ -41,81 +42,69 @@ def _as_df(data) -> pd.DataFrame:
         df = df.rename(columns={"change": "delta"})
     return df
 
-def cadence_bars_v2(*_ignored, title: str = "Current Cadence Buckets", provider=None):
-    """
-    Drop-in replacement for `cadence_bars`:
-    - provider(): returns dict / list[dict] / DataFrame with columns:
-        bucket (str), count (int), [delta (int or float, optional)]
-    - renders horizontal bars with big count labels and color-coded deltas
-    """
+# cadence_bars_v2: accept kwargs + enforce bucket order + nice labels
+def cadence_bars_v2(*_ignored, title: str = "Current Cadence Buckets", provider=None,
+                    order=None, **kwargs):
+
     if provider is None:
         st.info("No provider configured.")
         return
 
-    raw = provider()
+    # forward filters (e.g., signals=("attend",) or ("give",))
+    raw = provider(**kwargs)
     df = _as_df(raw)
     if df.empty:
         st.info("No cadence data.")
         return
 
-    # nice display order if buckets look like recency ranges
-    # normalize dash type so "0–7d" and "0-7d" both match
-    bk = df["bucket"].astype(str).str.replace("–", "-", regex=False).str.strip()
-    df["bucket"] = bk
+ # ── Order + labels ───────────────────────────────────────────────
+    default_order = ["weekly", "biweekly", "monthly", "6weekly", "irregular", "one_off"]
+    wanted = order or default_order
+    seen = list(df["bucket"].astype(str).unique())
+    ordered_buckets = [b for b in wanted if b in seen] + [b for b in seen if b not in wanted]
 
-    order_hint = ["0-7d","8-30d","31-60d","61-90d","91-180d","181-365d",">365d"]
-    cats = [b for b in order_hint if b in set(bk)]
+    label_map = {"biweekly": "bi-weekly", "6weekly": "6-weekly", "one_off": "one-off"}
+    df["bucket_label"] = df["bucket"].map(lambda b: label_map.get(b, b))
+    ordered_labels = [label_map.get(b, b) for b in ordered_buckets]
 
-    # fallback: natural-ish order by first number if we don't recognize the labels
-    if not cats:
-        cats = sorted(bk.unique(), key=lambda s: int("".join(ch for ch in s if ch.isdigit()) or "0"))
-
-    df["bucket"] = pd.Categorical(df["bucket"], categories=cats, ordered=True)
-    df = df.sort_values("bucket")
-
+    # ── Axis: no scientific notation + room for labels ───────────────
+    max_count = int(df["count"].max())
+    domain_max = int(math.ceil(max_count * 1.08))  # small right margin for the text labels
 
     base = alt.Chart(df)
 
-    bars = base.mark_bar(size=28).encode(
-        y=alt.Y("bucket:N", title=None, sort=cats),
-        x=alt.X("count:Q", title="People", axis=alt.Axis(format=",")),
+    bars = base.mark_bar(size=20).encode(  # thinner bar -> visible spacing
+        y=alt.Y("bucket_label:N", title=None, sort=ordered_labels),
+        x=alt.X(
+            "count:Q",
+            title="People",
+            scale=alt.Scale(domain=[0, domain_max], nice=False, zero=True),
+            axis=alt.Axis(format=",.0f")  # force 1,000 style (no 1e+3)
+        ),
         color=alt.value("#2563eb"),
         tooltip=[
-            alt.Tooltip("bucket:N", title="Bucket"),
-            alt.Tooltip("count:Q",  title="People", format=","),
-            alt.Tooltip("delta:Q",  title="Δ vs last wk", format="+,"),
-        ],
+            alt.Tooltip("bucket_label:N", title="Bucket"),
+            alt.Tooltip("count:Q", title="People", format=",.0f"),
+        ] + ([alt.Tooltip("delta:Q", title="Δ vs last wk", format="+,.0f")]
+             if "delta" in df.columns else []),
     )
 
-    # Large count labels
-    count_labels = base.mark_text(
-        align="left", dx=6, fontSize=16, fontWeight="bold", color="#e5e7eb"
+    # value labels at the end of bars (outside the bar)
+    text = base.mark_text(
+        align="left", dx=8, baseline="middle", fontWeight="bold", fill="#e5e7eb"
     ).encode(
-        y="bucket:N",
+        y=alt.Y("bucket_label:N", sort=ordered_labels),
         x="count:Q",
-        text=alt.Text("count:Q", format=","),
+        text=alt.Text("count:Q", format=",.0f"),
     )
 
-    # Optional Δ labels (colored)
-    if "delta" in df.columns:
-        df["delta_str"] = df["delta"].apply(lambda v: "" if pd.isna(v) else f"{v:+,}")
-        df["delta_sign"] = df["delta"].apply(lambda v: "pos" if (pd.notna(v) and v > 0) else ("neg" if pd.notna(v) and v < 0 else "zero"))
-        delta_labels = base.mark_text(
-            align="left", dx=80, fontSize=14, fontWeight="bold"
-        ).encode(
-            y="bucket:N",
-            x="count:Q",
-            text="delta_str:N",
-            color=alt.Color("delta_sign:N", legend=None,
-                            scale=alt.Scale(domain=["pos","neg","zero"],
-                                            range=["#16a34a","#ef4444","#9ca3af"])),
-        )
-        chart = bars + count_labels + delta_labels
-    else:
-        chart = bars + count_labels
-
-    st.subheader(title)
-    st.altair_chart(chart.properties(height=280).configure_axis(grid=True), use_container_width=True)
+    st.altair_chart(
+        (bars + text).properties(
+            title=title,
+            height=max(210, 50 * len(ordered_labels)),  # extra height = spacing between bars
+        ),
+        use_container_width=True,
+    )
 
 
 # 3) People table (e.g., newly lapsed)

@@ -130,53 +130,61 @@ def weekly_summary_view():
     )
 
     # ── KPI row with YoY deltas ──────────────────────────────────────────────
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    role = (st.session_state.get("auth_user", {}).get("role") or "viewer").lower()
+    viewer = (role == "viewer")
+
+    cols = st.columns(4 if viewer else 6)
+    i = 0
 
     # Adult Attendance
     if latest_att is not None:
         a_cur  = latest_att.get("total_attendance")
         a_prev = _yoy_value(att_all, "date", "total_attendance", latest_att["date"])
-        _metric_with_yoy(c1, "Adult Attendance", a_cur, a_prev)
+        _metric_with_yoy(cols[i], "Adult Attendance", a_cur, a_prev)
     else:
-        c1.metric("Adult Attendance", "—", "–")
+        cols[i].metric("Adult Attendance", "—", "–")
+    i += 1
 
-    # Total Giving ($)
-    if latest_give is not None:
+    # (Skip giving tiles entirely for viewer)
+    if not viewer and latest_give is not None:
+        # Total Giving ($)
         g_cur  = latest_give.get("total_giving")
         g_prev = _yoy_value(give_all, "week_end", "total_giving", latest_give["week_end"])
-        _metric_with_yoy(c2, "Total Giving", g_cur, g_prev, as_money=True)
+        _metric_with_yoy(cols[i], "Total Giving", g_cur, g_prev, as_money=True)
+        i += 1
 
         # Giving Units
         u_cur  = latest_give.get("giving_units")
         u_prev = _yoy_value(give_all, "week_end", "giving_units", latest_give["week_end"])
-        _metric_with_yoy(c3, "Giving Units", u_cur, u_prev)
-    else:
-        c2.metric("Total Giving", "—", "–")
-        c3.metric("Giving Units", "—", "–")
+        _metric_with_yoy(cols[i], "Giving Units", u_cur, u_prev)
+        i += 1
 
-    # Total Volunteers (from serving_volunteers_weekly) — now *after* Giving Units
+    # Total Volunteers
     if latest_vol is not None:
         v_cur  = latest_vol.get("total_volunteers")
         v_prev = _yoy_value(vol_all, "week_end", "total_volunteers", latest_vol["week_end"])
-        _metric_with_yoy(c4, "Total Volunteers", v_cur, v_prev)
+        _metric_with_yoy(cols[i], "Total Volunteers", v_cur, v_prev)
     else:
-        c4.metric("Total Volunteers", "—", "–")
+        cols[i].metric("Total Volunteers", "—", "–")
+    i += 1
 
     # Total Groups
     if latest_groups is not None and gcol:
         tg_cur  = latest_groups.get(gcol)
         tg_prev = _yoy_value(groups_all_df.rename(columns={"total_groups": "total_groups"}), "date", "total_groups", latest_groups["date"])
-        _metric_with_yoy(c5, "Total Groups", tg_cur, tg_prev)
+        _metric_with_yoy(cols[i], "Total Groups", tg_cur, tg_prev)
     else:
-        c6.metric("Total Groups", "—", "–")
+        cols[i].metric("Total Groups", "—", "–")
+    i += 1
 
     # First-Time Check-ins
     if latest_fd is not None:
         f_cur  = latest_fd.get("first_time_checkins")
         f_prev = _yoy_value(fd_all, "week_end", "first_time_checkins", latest_fd["week_end"])
-        _metric_with_yoy(c6, "First-Time Check-ins", f_cur, f_prev)
+        _metric_with_yoy(cols[i], "First-Time Check-ins", f_cur, f_prev)
     else:
-        c5.metric("First-Time Check-ins", "—", "–")
+        cols[i].metric("First-Time Check-ins", "—", "–")
+
 
     st.divider()
 
