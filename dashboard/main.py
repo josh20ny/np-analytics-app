@@ -9,13 +9,17 @@ import streamlit as st
 # Project imports
 from data import load_table, engine
 from config import TAB_CONFIG, TABLE_FILTERS
-from widgets.core import ranged_table
+from widgets.core import ranged_table, format_display_dates
 from widgets.legacy import (
     overlay_years_chart,
     weekly_yoy_table,
     pie_chart,
     kpi_card,
 )
+from widgets.weekly import weekly_summary_view
+from widgets.rolling import rolling_average_chart
+from widgets.giving_ytd import giving_ytd_bar
+
 from lib.auth import (
     login_gate,
     registration_panel,
@@ -26,6 +30,20 @@ from lib.emailer import send_email
 
 # Optional Admin panel (only shown for admins/owners if available)
 from widgets.admin import admin_panel
+
+# –– Maps ──────────────────────────────────────────────────────────────────────
+
+ROLLING_MAP = {
+    # Attendance tabs
+    "Adult Attendance":            {"table": "adult_attendance",   "date_col": "date",     "value_col": "total_attendance", "currency": False, "title": "Adult Attendance"},
+    "InsideOut Attendance":        {"table": "insideout_attendance","date_col": "date",     "value_col": "total_attendance", "currency": False, "title": "InsideOut Attendance"},
+    "Transit Attendance":          {"table": "transit_attendance",  "date_col": "date",     "value_col": "total_attendance", "currency": False, "title": "Transit Attendance"},
+    "UpStreet Attendance":         {"table": "upstreet_attendance", "date_col": "date",     "value_col": "total_attendance", "currency": False, "title": "UpStreet Attendance"},
+    "Waumba Land Attendance":      {"table": "waumbaland_attendance","date_col": "date",    "value_col": "total_attendance", "currency": False, "title": "Waumba Land Attendance"},
+    # Giving tab
+    "Giving":           {"table": "weekly_giving_summary","date_col": "week_end","value_col": "total_giving",      "currency": True,  "title": "Total Giving"},
+}
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="NP Analytics", layout="wide", initial_sidebar_state="expanded")
@@ -41,13 +59,46 @@ if not authed:
 # Sidebar password tools (renders in sidebar in your auth.py)
 password_tools()
 
-# Determine tab list (include Admin if role allows and panel exists)
+# Determine role and tabs
 user = st.session_state.get("auth_user", {})
-is_admin = user.get("role") in {"admin", "owner"}
-tab_names = list(TAB_CONFIG.keys()) + (["Admin"] if is_admin and admin_panel else [])
+is_admin = user.get("role") in {"admin"}
+
+# Put Weekly Summary first, then the rest, plus Admin (if allowed)
+base_tabs = ["Weekly Summary"]
+tab_names = base_tabs + list(TAB_CONFIG.keys()) + (["Admin"] if is_admin and admin_panel else [])
+
+ROLE_RULES = {
+    "viewer":  {"deny": {"Giving", "Engagement", "Admin"}},
+    "finance": {"deny": {"Engagement", "Admin"}},
+    "people":  {"deny": {"Admin"}},
+    "admin":   {"deny": set()},
+}
+
+def _effective_role(user):
+    # adapt to whatever you store in session
+    r = (st.session_state.get("auth_user", {}).get("role") or "").lower()
+    return r if r in ROLE_RULES else "viewer"
+
+role = _effective_role(st.session_state.get("auth_user", {}))
+deny = ROLE_RULES[role]["deny"]
+
+# include Weekly Summary by default + everything not denied
+tab_names = ["Weekly Summary"] + [t for t in TAB_CONFIG.keys() if t not in deny]
+if role != "admin":
+    # don't add Admin tab unless admin
+    pass
+else:
+    tab_names += ["Admin"]
 tabs = st.tabs(tab_names)
 
+
 for tab_obj, tab_name in zip(tabs, tab_names):
+    with tab_obj:
+        if tab_name == "Weekly Summary":
+            weekly_summary_view()
+            continue
+        
+
     with tab_obj:
         # Admin tab
         if tab_name == "Admin":
@@ -65,6 +116,74 @@ for tab_obj, tab_name in zip(tabs, tab_names):
             table_name, date_col_all, value_col_all = first_loader
         except Exception:
             table_name = date_col_all = value_col_all = None
+        
+        # ── Special case: Mailchimp tab shows per-audience tables ────────────────────
+        if tab_name == "Mailchimp":
+            try:
+                # Pull once, then slice by audience + date range
+                df_all = pd.read_sql(
+                    "SELECT week_end, audience_name, email_count, avg_open_rate, avg_click_rate "
+                    "FROM mailchimp_weekly_summary "
+                    "ORDER BY week_end DESC",
+                    engine,
+                    parse_dates=["week_end"],
+                )
+                if df_all.empty:
+                    st.info("No Mailchimp data.")
+                    continue
+
+                df_all = df_all.rename(columns={"week_end": "date"})
+
+                # Date range picker (shared across all audiences on this tab)
+                df_all["parsed_date"] = pd.to_datetime(df_all["date"], errors="coerce")
+                df_all = df_all.sort_values("parsed_date", ascending=False)
+                default_end = df_all["parsed_date"].iloc[0].date()
+                default_start = df_all["parsed_date"].iloc[min(14, len(df_all) - 1)].date()
+                start_date, end_date = st.date_input(
+                    "Date range",
+                    (default_start, default_end),
+                    key=f"mailchimp_range",
+                )
+                # Normalize inputs (tuple vs list)
+                if isinstance(start_date, (list, tuple)):
+                    start_date, end_date = start_date[0], start_date[1]
+
+                mask = (df_all["parsed_date"].dt.date >= start_date) & (df_all["parsed_date"].dt.date <= end_date)
+                df_window = df_all.loc[mask].drop(columns=["parsed_date"])
+
+                audiences = [
+                    "Northpoint Church",
+                    "InsideOut Parents",
+                    "Transit Parents",
+                    "Upstreet Parents",
+                    "Waumba Land Parents",
+                ]
+
+                for aud in audiences:
+                    sub = df_window[df_window["audience_name"] == aud].copy()
+                    st.subheader(aud)
+
+                    if sub.empty:
+                        st.info("No rows in selected range.")
+                        continue
+
+                    # Pretty dates for display
+                    display_df = sub[["date", "email_count", "avg_open_rate", "avg_click_rate"]].copy()
+                    display_df = format_display_dates(display_df)
+
+                    st.dataframe(display_df, use_container_width=True)
+
+                    # Averages row (numeric cols only)
+                    numeric_cols = display_df.select_dtypes(include="number").columns
+                    if len(numeric_cols) > 0:
+                        avg_row = display_df[numeric_cols].mean(numeric_only=True).to_frame().T
+                        avg_row.index = ["Averages"]
+                        st.dataframe(avg_row, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Mailchimp audience view error: {e}")
+            
+            # Skip the generic ranged_table for this tab
+            continue
 
         if table_name and table_name != "__service__" and date_col_all:
             flt = (TABLE_FILTERS or {}).get(tab_name, {})
@@ -78,6 +197,26 @@ for tab_obj, tab_name in zip(tabs, tab_names):
                 )
             except Exception as e:
                 st.warning(f"Could not load data for `{table_name}`: {e}")
+        
+        # --- Special case: Giving YTD at the very top ---
+        if tab_name == "Giving":
+            giving_ytd_bar(years_back=5)
+
+        # –– Rolling Average Table –––––––––––––––––––––––––––––––––––––––––––––
+        if tab_name in ROLLING_MAP:
+            cfg = ROLLING_MAP[tab_name]
+            st.subheader(f"{cfg['title']} — Rolling Average (last 12 months)")
+            rolling_average_chart(
+                table=cfg["table"],
+                date_col=cfg["date_col"],
+                value_col=cfg["value_col"],
+                title=cfg["title"],
+                default_months=6,   # slider default
+                last_days=365,
+                currency=cfg["currency"],
+                agg="mean",
+                key_suffix=tab_name.replace(" ", "_").lower(),
+            )
 
         # ── Widgets render loop ───────────────────────────────────────────────
         for meta in widgets:
@@ -160,24 +299,11 @@ for tab_obj, tab_name in zip(tabs, tab_names):
                 # If a pie widget didn't match any case, skip gracefully
                 continue
 
-            # 3) Special-case: KPI card (groups_summary latest value)
-            if widget_fn == kpi_card and table == "groups_summary":
-                try:
-                    gs = pd.read_sql(
-                        "SELECT date, number_of_groups FROM groups_summary",
-                        engine,
-                        parse_dates=["date"],
-                    )
-                    if not gs.empty:
-                        latest = int(gs.sort_values("date").iloc[-1]["number_of_groups"] or 0)
-                        kpi_card(args["label"], latest)  # Note: no df passed
-                except Exception as e:
-                    st.warning(f"KPI widget error: {e}")
-                continue
-
             # 4) Default: load normalized df (date/value/year/week) for legacy widgets
             try:
                 df = load_table(table, date_col, value_col) if table else None
                 widget_fn(df, **args)
             except Exception as e:
                 st.warning(f"Widget error for `{table}`: {e}")
+
+            

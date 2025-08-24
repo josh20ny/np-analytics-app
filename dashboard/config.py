@@ -1,5 +1,5 @@
 from widgets import overlay_years_chart, weekly_yoy_table, pie_chart, kpi_card
-from widgets import stat_row, cadence_bars, people_table
+from widgets.engagement import stat_row, cadence_bars_v2, people_table
 from services.engagement import get_recent_engagement, get_cadence_summary, get_lapsed_people
 
 # Mapping of tabs to widget definitions
@@ -128,7 +128,7 @@ TAB_CONFIG = {
          "args": {"title": "This Week", "provider": get_recent_engagement}},
 
         {"loader": ("__service__", "ignored", None),
-         "widget": cadence_bars,
+         "widget": cadence_bars_v2,
          "args": {"title": "Current Cadence Buckets", "provider": get_cadence_summary}},
 
         {"loader": ("__service__", "ignored", None),

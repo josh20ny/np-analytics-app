@@ -28,41 +28,36 @@ def _fmt_month_day_year(s: pd.Series) -> pd.Series:
     return (s.dt.strftime("%B ") + s.dt.day.astype("Int64").astype("string") + s.dt.strftime(", %Y")).astype("string")
 
 def _looks_like_iso(series: pd.Series) -> bool:
-    # Sample a few non-null stringified values for ISO-like pattern
     sample = series.dropna().astype(str).head(30)
     if sample.empty:
         return False
     hits = sample.map(lambda x: bool(ISO_DT_RE.match(x))).sum()
     return (hits / len(sample)) >= 0.6
 
+def format_date_series(s: pd.Series) -> pd.Series:
+    """
+    Convert anything parseable to 'Month D, YYYY' strings.
+    Avoids platform issues with %-d by composing the day manually.
+    """
+    s = pd.to_datetime(s, errors="coerce", utc=False)
+    return (s.dt.strftime("%B ")
+            + s.dt.day.astype("Int64").astype("string")
+            + s.dt.strftime(", %Y")).astype("string")
+
 def format_display_dates(df: pd.DataFrame, exclude=("parsed_date",)) -> pd.DataFrame:
     """
     Force all columns that are datetimes or look like datetimes
-    into 'Month D, YYYY' STRINGS for display.
+    into 'Month D, YYYY' STRINGS for display (non-destructive to the original df).
     """
     out = df.copy()
-    cols = list(out.columns)
-
-    # 1) Force-format known columns by name
-    for col in (DATEISH_COLUMNS & set(cols)) - set(exclude):
-        out.loc[:, col] = _fmt_month_day_year(out[col])
-
-    # 2) Anything with datetime dtype (naive or tz-aware)
-    for c in cols:
-        if c in exclude:
+    for col in out.columns:
+        if col in exclude:
             continue
-        if is_datetime64_any_dtype(out[c]) or is_datetime64tz_dtype(out[c]):
-            out.loc[:, c] = _fmt_month_day_year(out[c])
-
-    # 3) Object columns that look like ISO dates/times
-    for c in cols:
-        if c in exclude:
-            continue
-        col = out[c]
-        if is_object_dtype(col) and not is_numeric_dtype(col):
-            if _looks_like_iso(col):
-                out.loc[:, c] = _fmt_month_day_year(col)
-
+        series = out[col]
+        if is_datetime64_any_dtype(series) or is_datetime64tz_dtype(series):
+            out[col] = format_date_series(series)
+        elif (col in DATEISH_COLUMNS or is_object_dtype(series)) and _looks_like_iso(series):
+            out[col] = format_date_series(series)
     return out
 
 def ranged_table(

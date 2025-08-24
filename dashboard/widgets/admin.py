@@ -3,7 +3,7 @@ from lib.db import fetch_users_all, set_user_role, set_user_active, approve_user
 import os
 from lib.emailer import send_email
 
-ROLES = ["viewer", "admin", "owner"]
+ROLES = ["viewer", "finance", "people", "admin"]
 
 def admin_panel():
     st.title("🛠️ Admin")
