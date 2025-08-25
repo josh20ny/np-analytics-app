@@ -20,6 +20,7 @@ TABLES = {
     "WaumbaLandAttendance": ("waumbaland_attendance",    "date"),
     "WeeklyYouTubeSummary": ("weekly_youtube_summary",   "week_end"),
     "WeeklyGivingSummary":  ("weekly_giving_summary",    "week_end"),
+    "ServingVolunteersWeekly": ("serving_volunteers_weekly", "week_end"),
 }
 
 DATABASE_URL = settings.DATABASE_URL

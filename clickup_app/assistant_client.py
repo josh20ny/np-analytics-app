@@ -10,6 +10,7 @@ from clickup_app.assistant_tools import (
     aggregate_total_attendance,
     compare_adult_attendance,
 )
+from app.utils.common import now_cst, get_last_sunday_cst, get_previous_week_dates_cst 
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
@@ -36,12 +37,23 @@ def run_assistant_with_tools(prompt: str) -> str:
     print("🧠 Assistant input:", prompt)
     start = time.time()
 
+    # 🔎 Build time context (CST)
+    today_cst = now_cst().date()
+    last_sunday = get_last_sunday_cst()
+    prev_mon, prev_sun = get_previous_week_dates_cst()  # returns ISO strings
+    context = (
+        f"[Context] Today is {today_cst} (America/Chicago). "
+        f"Most recent Sunday: {last_sunday}. "
+        f"Last full week (Mon–Sun): {prev_mon} to {prev_sun}."
+    )
+
     # Create a conversation thread
     thread = openai.beta.threads.create()
     openai.beta.threads.messages.create(
         thread_id=thread.id,
         role="user",
-        content=prompt
+        # 👇 Prepend the time context before the actual user prompt
+        content=context + "\n\n" + prompt
     )
 
     # Run the assistant with tool support
@@ -112,6 +124,7 @@ def call_tool_function(function_name: str, args: dict) -> str:
         "getWaumbaLandAttendance": "WaumbaLandAttendance",
         "getWeeklyYouTubeSummary": "WeeklyYouTubeSummary",
         "getWeeklyGivingSummary":    "WeeklyGivingSummary",
+        "getServingVolunteersWeekly": "ServingVolunteersWeekly",
     }
 
     if function_name in table_tools:
