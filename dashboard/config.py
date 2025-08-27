@@ -1,6 +1,6 @@
-from widgets import overlay_years_chart, weekly_yoy_table, pie_chart, kpi_card
-from widgets.engagement import stat_row, cadence_bars_v2, people_table
-from services.engagement import get_recent_engagement, get_cadence_summary, get_lapsed_people
+from widgets import overlay_years_chart, weekly_yoy_table, pie_chart, kpi_card, pie_chart_from_provider
+from widgets.engagement import stat_row, cadence_bars_v2, people_table, matrix_table
+from services.engagement import get_recent_engagement, get_cadence_summary, get_lapsed_people, get_back_door_summary, get_downshifts_people, get_new_nla_people, get_downshifts_from_pie, get_downshift_flow_table
 
 # Mapping of tabs to widget definitions
 # Each widget: loader=(table_name, date_col, value_col), widget=function, args=dict
@@ -149,6 +149,40 @@ TAB_CONFIG = {
         {"loader": ("__service__", "ignored", None),
          "widget": people_table,
          "args": {"title": "Lapsed (newly flagged)", "provider": get_lapsed_people, "limit": 100}},
+                 {"loader": ("__service__", "ignored", None),
+         "widget": stat_row,
+         "args": {"title": "Back Door (Last Sunday)", "provider": get_back_door_summary}},
+
+        # Trend charts pulled straight from DB tables
+        {"loader": ("back_door_weekly", "week_end", "bdi"),
+         "widget": overlay_years_chart,
+         "args": {"title": "Back Door Index by Year"}},
+
+        {"loader": ("back_door_weekly", "week_end", "new_nla_count"),
+         "widget": overlay_years_chart,
+         "args": {"title": "New 'No Longer Attends' by Week"}},
+
+        # Actionable lists
+        {"loader": ("__service__", "ignored", None),
+         "widget": people_table,
+         "args": {"title": "Down-shifts this Week", "provider": get_downshifts_people, "limit": 200}},
+
+        {"loader": ("__service__", "ignored", None),
+         "widget": people_table,
+         "args": {"title": "New 'No Longer Attends' (90 days)", "provider": get_new_nla_people, "limit": 200}},
+        # Pie: where did drops start?
+        {"loader": ("__service__", "ignored", None),
+        "widget": pie_chart_from_provider,
+        "args": {"title": "Down-shifts by Starting Tier", "provider": get_downshifts_from_pie}},
+
+
+
+
+        # Matrix: From → To
+        {"loader": ("__service__", "ignored", None),
+         "widget": matrix_table,
+         "args": {"title": "Down-shift Flow (From → To)", "provider": get_downshift_flow_table}},
+
     ],
 }
 

@@ -124,6 +124,23 @@ def pie_chart(_df, labels: list, values: list, title: str):
     ax.axis('equal')
     st.pyplot(fig)
 
+def pie_chart_from_provider(title: str, provider):
+    """
+    provider() -> DataFrame with columns ['label','value'].
+    Calls pie_chart(_df, labels, values, title) with the correct ordering.
+    """
+    df = provider()
+    if df is None or getattr(df, "empty", True):
+        import streamlit as st
+        st.write(f"No data to display for {title}")
+        return
+
+    labels = [str(x) for x in (df["label"].tolist() if "label" in df.columns else df.index.tolist())]
+    values = df["value"].tolist() if "value" in df.columns else []
+
+    return pie_chart(df, labels, values, title)
+
+
 
 def kpi_card(label: str, value, delta=None):
     """

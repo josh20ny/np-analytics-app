@@ -2,14 +2,19 @@
 from __future__ import annotations
 
 import logging
+import json
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from statistics import median
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
-from fastapi import HTTPException
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response, HTTPException
 from sqlalchemy.orm import Session
+import pandas as pd
+from sqlalchemy import text
+from datetime import date as _date, timedelta
+
+from dashboard.data import engine
 
 from app.db import get_conn, get_db
 from app.utils.common import (
@@ -42,6 +47,14 @@ class CadenceStats:
     bucket: str  # 'weekly' | 'biweekly' | 'monthly' | '6weekly' | 'irregular'
 
 BUCKET_TARGETS = [7, 14, 30, 42]  # weekly, biweekly, monthly(≈4w), 6weekly
+
+def _to_date(val):
+    if val is None:
+        return None
+    if isinstance(val, date):
+        return val
+    # handle "YYYY-MM-DD" strings
+    return date.fromisoformat(val)
 
 def _days_between(ds: Sequence[date]) -> List[int]:
     if not ds or len(ds) < 2:
@@ -912,7 +925,7 @@ def detect_and_write_lapses_for_week(
     week_end: date,
     signals: tuple[str, ...] = ("attend","give"),
     *,
-    inactivity_days_for_drop: int = 180,
+    inactivity_days_for_drop: int = 90,
 ) -> dict:
     """
     Returns a rich payload:
@@ -1210,9 +1223,9 @@ def _fetch_newly_lapsed_aggregate(week_end: date) -> tuple[int, dict, list]:
     items = list(per_person.values())
     return len(items), by_signal, items
 
-def _fetch_newly_no_longer_attends(week_end: date, inactivity_days: int = 180) -> list[dict]:
+def _fetch_newly_no_longer_attends(week_end: date, inactivity_days: int = 90) -> list[dict]:
     """
-    People who *first* crossed the 6-month inactivity threshold in this week
+    People who *first* crossed the 3-month inactivity threshold in this week
     AND are Engaged 0 for week_end. Includes per-signal last dates and first_seen_any.
     Engagement signals considered: attend, give, serve, group.
     """
@@ -1265,7 +1278,7 @@ def _fetch_newly_no_longer_attends(week_end: date, inactivity_days: int = 180) -
               FROM greatest_last gl
               JOIN engaged0 e0 ON e0.person_id = gl.person_id
               WHERE gl.last_any > %s  -- not already “dropped” before last week
-                AND gl.last_any <= %s -- crosses the 180-day boundary this week
+                AND gl.last_any <= %s -- crosses the 90-day boundary this week
             )
             SELECT
               p.person_id, p.first_name, p.last_name, p.email,
@@ -1318,11 +1331,21 @@ def _fetch_all_lapsed_people(
     lapse_threshold: int = LAPSE_CYCLES_THRESHOLD,
 ) -> list[dict]:
     """
-    All people who are currently considered 'lapsed' as-of week_end,
-    using the same ATTEND gating you use elsewhere:
+    All people currently considered 'lapsed' as-of week_end, with cadence buckets by signal.
+    ATTEND gating:
       • engaged_tier == 0 at week_end
       • household has kids < 14
     Only includes real cadence buckets (excludes irregular/one_off).
+
+    Returns dicts like:
+      {
+        "person_id": "...",
+        "name": "First Last",
+        "email": "...",
+        "signals": ["attend","give"],
+        "cadence": {"attend":"weekly","give":"biweekly"},
+        "lapsed_cycles": 3
+      }
     """
     conn = get_conn(); cur = conn.cursor()
     try:
@@ -1356,14 +1379,23 @@ def _fetch_all_lapsed_people(
               WHERE COALESCE(engaged_tier,0) = 0
                 AND has_kid_u14
             ),
+            -- Deduplicate in case multiple rows per (person, signal) slip through
+            eligible1 AS (
+              SELECT DISTINCT ON (person_id, signal)
+                     person_id, signal, bucket, missed_cycles
+              FROM eligible
+              ORDER BY person_id, signal, missed_cycles DESC
+            ),
             rollup AS (
               SELECT e.person_id,
-                ARRAY_AGG(DISTINCT e.signal) AS signals,
-                MAX(e.missed_cycles) AS lapsed_cycles
-              FROM eligible e
+                     JSONB_OBJECT_AGG(e.signal, e.bucket)         AS cadence_by_signal,
+                     ARRAY_AGG(DISTINCT e.signal)                  AS signals,
+                     MAX(e.missed_cycles)                          AS lapsed_cycles
+              FROM eligible1 e
               GROUP BY e.person_id
             )
-            SELECT p.person_id, p.first_name, p.last_name, p.email, r.signals, r.lapsed_cycles
+            SELECT p.person_id, p.first_name, p.last_name, p.email,
+                   r.signals, r.lapsed_cycles, r.cadence_by_signal
             FROM rollup r
             JOIN pco_people p ON p.person_id = r.person_id
             ORDER BY r.lapsed_cycles ASC, p.last_name, p.first_name;
@@ -1374,16 +1406,385 @@ def _fetch_all_lapsed_people(
     finally:
         cur.close(); conn.close()
 
-    return [
-        {
+    out = []
+    for (pid, fn, ln, email, sig_arr, lc, cadence_json) in rows:
+        # psycopg2 may already decode jsonb -> dict; if not, parse from string
+        if isinstance(cadence_json, str):
+            cadence = json.loads(cadence_json) if cadence_json else {}
+        else:
+            cadence = cadence_json or {}
+        out.append({
             "person_id": pid,
-            "name": f"{fn or ''} {ln or ''}".strip(),
+            "name": f"{(fn or '').strip()} {(ln or '').strip()}".strip(),
             "email": email,
             "signals": list(sig_arr or []),
+            "cadence": cadence,                       # e.g., {"attend":"weekly","give":"biweekly"}
             "lapsed_cycles": int(lc) if lc is not None else None,
+        })
+    return out
+
+def write_engagement_tier_transitions(week_end: date) -> int:
+    prev = week_end - timedelta(days=7)
+    sql = """
+    INSERT INTO engagement_tier_transitions
+      (person_id, week_end, from_tier, to_tier, delta, campus_id)
+    SELECT c.person_id, %s, p.engaged_tier AS from_tier, c.engaged_tier AS to_tier,
+           (c.engaged_tier - p.engaged_tier) AS delta, c.campus_id
+    FROM snap_person_week c
+    JOIN snap_person_week p
+      ON p.person_id = c.person_id AND p.week_end = %s
+    WHERE c.week_end = %s
+      AND c.engaged_tier < p.engaged_tier
+    ON CONFLICT (person_id, week_end) DO NOTHING;
+    """
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute(sql, (week_end, prev, week_end))
+        n = cur.rowcount or 0
+        conn.commit()
+        return n
+    finally:
+        cur.close(); conn.close()
+
+
+def persist_new_nla_events(week_end: date, inactivity_days: int = 90) -> int:
+    """Insert first-time NLA events for this week; ignore if already recorded."""
+    items = _fetch_newly_no_longer_attends(week_end, inactivity_days=inactivity_days)
+    if not items:
+        return 0
+
+    # Build VALUES list for bulk insert — ensure DATE types
+    vals = []
+    for i in items:
+        last_any_dt = _to_date(i["last_signals"].get("last_any"))
+        first_any_dt = _to_date(i.get("first_seen_any"))
+        # last_any_date is NOT NULL in the table; sanity guard
+        if last_any_dt is None:
+            continue
+        vals.append((i["person_id"], week_end, last_any_dt, first_any_dt))
+
+    if not vals:
+        return 0
+
+    placeholders = ",".join(["(%s,%s,%s,%s)"] * len(vals))
+    args = [x for row in vals for x in row]
+
+    sql = f"""
+    WITH v(person_id, week_end, last_any_date, first_seen_any) AS (
+      VALUES {placeholders}
+    )
+    INSERT INTO no_longer_attends_events
+      (person_id, week_end, last_any_date, first_seen_any, campus_id)
+    SELECT v.person_id, v.week_end, v.last_any_date, v.first_seen_any, s.campus_id
+    FROM v
+    LEFT JOIN snap_person_week s
+      ON s.person_id = v.person_id AND s.week_end = v.week_end
+    ON CONFLICT (person_id) DO NOTHING;
+    """
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute(sql, args)
+        n = cur.rowcount or 0
+        conn.commit()
+        return n
+    finally:
+        cur.close(); conn.close()
+
+
+
+def upsert_back_door_weekly(week_end: date, reengaged_count: int = 0) -> dict:
+    prev = week_end - timedelta(days=7)
+    sql = """
+    WITH prev AS (
+      SELECT person_id,
+             gave_ontrack_bool     AS prev_give,
+             served_ontrack_bool   AS prev_serve,
+             in_group_ontrack_bool AS prev_group
+      FROM snap_person_week
+      WHERE week_end = %s
+    ),
+    curr AS (
+      SELECT person_id,
+             gave_ontrack_bool     AS curr_give,
+             served_ontrack_bool   AS curr_serve,
+             in_group_ontrack_bool AS curr_group
+      FROM snap_person_week
+      WHERE week_end = %s
+    ),
+    -- most informative cadence bucket per person for giving
+    cad AS (
+      SELECT DISTINCT ON (pc.person_id)
+             pc.person_id, pc.bucket
+      FROM person_cadence pc
+      WHERE pc.signal = 'give'
+      ORDER BY pc.person_id, pc.samples_n DESC
+    ),
+    -- last gift date up to week_end from fact table
+    last_gift AS (
+      SELECT person_id, MAX(week_end)::date AS last_gift_week
+      FROM f_giving_person_week
+      WHERE week_end <= %s AND gift_count > 0
+      GROUP BY person_id
+    ),
+    stops AS (
+      SELECT
+        e.person_id, e.from_tier, e.to_tier,
+        (pv.prev_serve = TRUE AND co.curr_serve = FALSE) AS stop_serve,
+        (pv.prev_group = TRUE AND co.curr_group = FALSE) AS stop_group,
+        (
+          pv.prev_give = TRUE AND co.curr_give = FALSE
+          AND lg.last_gift_week IS NOT NULL
+          AND ((%s::date - lg.last_gift_week) >= GREATEST(
+                60,
+                CASE cad.bucket
+                  WHEN 'weekly'   THEN 2*7
+                  WHEN 'biweekly' THEN 2*14
+                  WHEN 'monthly'  THEN 2*30
+                  WHEN '6weekly'  THEN 2*42
+                  ELSE 60
+                END
+              ))
+        ) AS stop_give
+      FROM engagement_tier_transitions e
+      LEFT JOIN prev pv   ON pv.person_id   = e.person_id
+      LEFT JOIN curr co   ON co.person_id   = e.person_id
+      LEFT JOIN cad       ON cad.person_id  = e.person_id
+      LEFT JOIN last_gift lg ON lg.person_id = e.person_id
+      WHERE e.week_end = %s
+    ),
+    agg AS (
+      SELECT
+        COUNT(*) FILTER (WHERE (stop_serve OR stop_group OR stop_give))                                         AS downshifts_total,
+        COUNT(*) FILTER (WHERE from_tier=3 AND to_tier=2 AND (stop_serve OR stop_group OR stop_give))           AS d_3_2,
+        COUNT(*) FILTER (WHERE from_tier=2 AND to_tier=1 AND (stop_serve OR stop_group OR stop_give))           AS d_2_1,
+        COUNT(*) FILTER (WHERE from_tier=1 AND to_tier=0 AND (stop_serve OR stop_group OR stop_give))           AS d_1_0
+      FROM stops
+    ),
+    new_nla AS (
+      SELECT COUNT(*) AS c FROM no_longer_attends_events WHERE week_end = %s
+    )
+    INSERT INTO back_door_weekly
+      (week_end, downshifts_total, downshift_3_to_2, downshift_2_to_1, downshift_1_to_0,
+       new_nla_count, reengaged_count, bdi)
+    SELECT
+      %s,
+      a.downshifts_total, a.d_3_2, a.d_2_1, a.d_1_0,
+      nn.c, %s,
+      (a.downshifts_total + nn.c - %s)::numeric
+    FROM agg a, new_nla nn
+    ON CONFLICT (week_end) DO UPDATE SET
+      downshifts_total   = EXCLUDED.downshifts_total,
+      downshift_3_to_2   = EXCLUDED.downshift_3_to_2,
+      downshift_2_to_1   = EXCLUDED.downshift_2_to_1,
+      downshift_1_to_0   = EXCLUDED.downshift_1_to_0,
+      new_nla_count      = EXCLUDED.new_nla_count,
+      reengaged_count    = EXCLUDED.reengaged_count,
+      bdi                = EXCLUDED.bdi
+    RETURNING downshifts_total, downshift_3_to_2, downshift_2_to_1, downshift_1_to_0, new_nla_count, reengaged_count, bdi;
+    """
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute(sql, (
+            prev,            # prev
+            week_end,        # curr
+            week_end,        # last_gift
+            week_end,        # stop_give days calc
+            week_end,        # stops filter
+            week_end,        # new_nla
+            week_end,        # INSERT week_end
+            reengaged_count, # INSERT value
+            reengaged_count, # BDI subtract
+        ))
+        row = cur.fetchone()
+        conn.commit()
+        return {
+            "downshifts_total": row[0], "downshift_3_to_2": row[1], "downshift_2_to_1": row[2],
+            "downshift_1_to_0": row[3], "new_nla_count": row[4], "reengaged_count": row[5], "bdi": row[6],
         }
-        for (pid, fn, ln, email, sig_arr, lc) in rows
-    ]
+    finally:
+        cur.close(); conn.close()
+
+
+def backdoor_tenure_stats() -> dict:
+    """
+    Summarize 'time to leave' (days between first_seen_any and last_any_date)
+    from no_longer_attends_events. Returns integers for avg/p50/p90.
+    """
+    sql = """
+    WITH d AS (
+      SELECT (last_any_date - first_seen_any) AS days
+      FROM no_longer_attends_events
+      WHERE first_seen_any IS NOT NULL
+    )
+    SELECT
+      COALESCE(AVG(days), 0)::int AS avg_days,
+      COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days), 0)::int AS p50,
+      COALESCE(PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY days), 0)::int AS p90,
+      COUNT(*)::int AS people
+    FROM d;
+    """
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute(sql)
+        avg_days, p50, p90, n = cur.fetchone()
+    finally:
+        cur.close(); conn.close()
+    return {"avg_days": int(avg_days or 0), "p50_days": int(p50 or 0), "p90_days": int(p90 or 0), "people": int(n or 0)}
+
+def get_downshifts_people(limit: int = 200) -> pd.DataFrame:
+    with engine.connect() as c:
+        wk = c.execute(text("SELECT MAX(week_end) FROM engagement_tier_transitions;")).scalar()
+        if not wk:
+            return pd.DataFrame(columns=["person_id","name","email","from_tier","to_tier","stopped","campus_id"])
+
+        df = pd.read_sql(
+            text("""
+                WITH prev AS (
+                  SELECT person_id,
+                         gave_ontrack_bool AS prev_give,
+                         served_ontrack_bool AS prev_serve,
+                         in_group_ontrack_bool AS prev_group
+                  FROM snap_person_week WHERE week_end = :prev
+                ),
+                curr AS (
+                  SELECT person_id,
+                         gave_ontrack_bool AS curr_give,
+                         served_ontrack_bool AS curr_serve,
+                         in_group_ontrack_bool AS curr_group
+                  FROM snap_person_week WHERE week_end = :wk
+                ),
+                cad AS (
+                  SELECT DISTINCT ON (pc.person_id)
+                         pc.person_id, pc.bucket
+                  FROM person_cadence pc
+                  WHERE pc.signal = 'give'
+                  ORDER BY pc.person_id, pc.samples_n DESC
+                ),
+                last_gift AS (
+                  SELECT person_id, MAX(week_end)::date AS last_gift_week
+                  FROM f_giving_person_week
+                  WHERE week_end <= :wk AND gift_count > 0
+                  GROUP BY person_id
+                )
+                SELECT e.person_id,
+                       COALESCE(p.first_name,'') || ' ' || COALESCE(p.last_name,'') AS name,
+                       COALESCE(p.email,'') AS email,
+                       e.from_tier, e.to_tier, e.campus_id,
+                       ARRAY_REMOVE(ARRAY[
+                         CASE WHEN pv.prev_give = TRUE AND co.curr_give = FALSE
+                                   AND lg.last_gift_week IS NOT NULL
+                                   AND ((:wk::date - lg.last_gift_week) >= GREATEST(
+                                         60,
+                                         CASE cad.bucket
+                                           WHEN 'weekly'   THEN 2*7
+                                           WHEN 'biweekly' THEN 2*14
+                                           WHEN 'monthly'  THEN 2*30
+                                           WHEN '6weekly'  THEN 2*42
+                                           ELSE 60
+                                         END
+                                       ))
+                              THEN 'giving' END,
+                         CASE WHEN pv.prev_serve = TRUE AND co.curr_serve = FALSE THEN 'serving' END,
+                         CASE WHEN pv.prev_group = TRUE AND co.curr_group = FALSE THEN 'groups' END
+                       ], NULL) AS stopped_signals
+                FROM engagement_tier_transitions e
+                JOIN pco_people p ON p.person_id = e.person_id
+                LEFT JOIN prev pv   ON pv.person_id   = e.person_id
+                LEFT JOIN curr co   ON co.person_id   = e.person_id
+                LEFT JOIN cad       ON cad.person_id  = e.person_id
+                LEFT JOIN last_gift lg ON lg.person_id = e.person_id
+                WHERE e.week_end = :wk
+                ORDER BY e.from_tier DESC, e.to_tier, p.last_name, p.first_name
+                LIMIT :l
+            """),
+            con=engine,
+            params={"wk": wk, "prev": wk - pd.Timedelta(days=7), "l": limit},
+        )
+
+    df["stopped"] = df["stopped_signals"].apply(lambda arr: ", ".join(arr) if isinstance(arr, list) and arr else "")
+    if "stopped_signals" in df.columns:
+        df = df.drop(columns=["stopped_signals"])
+    return df.reindex(columns=[c for c in ["person_id","name","email","from_tier","to_tier","stopped","campus_id"] if c in df.columns])
+
+def get_downshift_flow(week_end: date) -> dict:
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            WITH prev AS (
+              SELECT person_id,
+                     gave_ontrack_bool     AS prev_give,
+                     served_ontrack_bool   AS prev_serve,
+                     in_group_ontrack_bool AS prev_group
+              FROM snap_person_week
+              WHERE week_end = %s - INTERVAL '7 days'
+            ),
+            curr AS (
+              SELECT person_id,
+                     gave_ontrack_bool     AS curr_give,
+                     served_ontrack_bool   AS curr_serve,
+                     in_group_ontrack_bool AS curr_group
+              FROM snap_person_week
+              WHERE week_end = %s
+            ),
+            cad AS (
+              SELECT DISTINCT ON (pc.person_id)
+                     pc.person_id, pc.bucket
+              FROM person_cadence pc
+              WHERE pc.signal = 'give'
+              ORDER BY pc.person_id, pc.samples_n DESC
+            ),
+            last_gift AS (
+              SELECT person_id, MAX(week_end)::date AS last_gift_week
+              FROM f_giving_person_week
+              WHERE week_end <= %s AND gift_count > 0
+              GROUP BY person_id
+            ),
+            stops AS (
+              SELECT e.person_id,
+                     (pv.prev_serve = TRUE AND co.curr_serve = FALSE) AS stop_serve,
+                     (pv.prev_group = TRUE AND co.curr_group = FALSE) AS stop_group,
+                     (
+                       pv.prev_give = TRUE AND co.curr_give = FALSE
+                       AND lg.last_gift_week IS NOT NULL
+                       AND ((%s::date - lg.last_gift_week) >= GREATEST(
+                             60,
+                             CASE cad.bucket
+                               WHEN 'weekly'   THEN 2*7
+                               WHEN 'biweekly' THEN 2*14
+                               WHEN 'monthly'  THEN 2*30
+                               WHEN '6weekly'  THEN 2*42
+                               ELSE 60
+                             END
+                           ))
+                     ) AS stop_give
+              FROM engagement_tier_transitions e
+              LEFT JOIN prev pv   ON pv.person_id   = e.person_id
+              LEFT JOIN curr co   ON co.person_id   = e.person_id
+              LEFT JOIN cad       ON cad.person_id  = e.person_id
+              LEFT JOIN last_gift lg ON lg.person_id = e.person_id
+              WHERE e.week_end = %s
+            )
+            SELECT e.from_tier, e.to_tier, COUNT(*)::int AS c
+            FROM engagement_tier_transitions e
+            JOIN stops s ON s.person_id = e.person_id
+            WHERE e.week_end = %s
+              AND (s.stop_serve OR s.stop_group OR s.stop_give)
+            GROUP BY 1,2
+            ORDER BY from_tier DESC, to_tier DESC;
+            """,
+            (week_end, week_end, week_end, week_end, week_end, week_end),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close(); conn.close()
+
+    matrix = [{"from": f, "to": t, "count": int(c)} for (f, t, c) in rows]
+    by_from, total = {"3": 0, "2": 0, "1": 0}, 0
+    for r in matrix:
+        by_from[str(r["from"])] += r["count"]
+        total += r["count"]
+    return {"matrix": matrix, "from_breakdown": by_from, "total": total}
 
 
 # ─────────────────────────────
@@ -1519,6 +1920,8 @@ def build_weekly_report(
     if ensure_snapshot:
         build_weekly_snapshot(db, week_end=week_end, ensure_cadence=False)
 
+    write_engagement_tier_transitions(week_end)
+
     # 3) Cadence buckets (serve cadence removed)
     buckets = {
         "attend": _bucket_counts("attend", week_end=week_end, exclude_lapsed=True),
@@ -1530,6 +1933,7 @@ def build_weekly_report(
     if persist_front_door:
         _upsert_front_door_weekly(week_start, week_end, fd_counts)
 
+    backdoor_tenure_stats()
     # 5) Engaged tiers directly from snapshot (no person_engagement_weekly table needed)
     conn = get_conn(); cur = conn.cursor()
     try:
@@ -1557,7 +1961,7 @@ def build_weekly_report(
     payload = detect_and_write_lapses_for_week(
         week_end,
         signals=("attend","give"),  # groups excluded from “lapsed” logic
-        inactivity_days_for_drop=180,
+        inactivity_days_for_drop=90,
     )
     new_lapsed_total_people = payload.get("new_total_people", 0)
     new_lapsed_by_signal    = payload.get("new_by_signal", {})
@@ -1575,6 +1979,17 @@ def build_weekly_report(
 
     asof = _asof_counts(week_end)
 
+    # persist new NLA events for tenure analytics
+    persist_new_nla_events(week_end, inactivity_days=90)
+
+    # use the payload's reengaged count if available (fallback 0)
+    reengaged_ct = int(payload.get("reengaged_count", 0)) if isinstance(payload.get("reengaged_count", 0), (int, float)) else 0
+
+    # upsert Back Door weekly roll-up
+    bd = upsert_back_door_weekly(week_end, reengaged_count=reengaged_ct)
+    flow = get_downshift_flow(week_end)
+
+
     return {
         "week_start": str(week_start),
         "week_end": str(week_end),
@@ -1586,6 +2001,17 @@ def build_weekly_report(
             "first_time_groups":   fd_counts[2],
             "first_time_serving":  fd_counts[3],
         },
+        "back_door": {
+            "downshifts_total": bd["downshifts_total"],
+            "downshift_3_to_2": bd["downshift_3_to_2"],
+            "downshift_2_to_1": bd["downshift_2_to_1"],
+            "downshift_1_to_0": bd["downshift_1_to_0"],
+            "from_breakdown":   flow["from_breakdown"],  
+            "flow":             flow["matrix"],          
+            "new_nla_count":    bd["new_nla_count"],
+            "reengaged_count":  bd["reengaged_count"],
+            "bdi":              float(bd["bdi"]),
+        },
         "lapses": {
             "new_this_week_total": new_lapsed_total_people,
             "new_by_signal": new_lapsed_by_signal,
@@ -1596,16 +2022,15 @@ def build_weekly_report(
             "all_lapsed_people": _fetch_all_lapsed_people(week_end, signals=("attend","give")),  # ★ NEW
         },
         "no_longer_attends": {
-            "added_this_week": len(_fetch_newly_no_longer_attends(week_end, inactivity_days=180)),
-            "items":           _fetch_newly_no_longer_attends(week_end, inactivity_days=180),
+            "added_this_week": len(_fetch_newly_no_longer_attends(week_end, inactivity_days=90)),
+            "items":           _fetch_newly_no_longer_attends(week_end, inactivity_days=90),
         },
         "as_of": asof,
         "adult_attendance_avg_4w": avg4,
         "notes": [
-            f"Cadences computed over a rolling {rolling_days}-day window; low samples (<4) => irregular.",
             "Engaged tiers use snapshot booleans (giving + serving + in_group). Attendance isn’t part of the tier.",
-            "Lapsed = missed >= 3 cycles; items_* lists include those hitting 3 missed cycles this week.",
-            "“No longer attends” = no engagement for 180 days; list shows only those added this week.",
+            "Lapsed = missed ≥ 3 cycles; items_* lists include those hitting 3 missed cycles this week.",
+            "“No longer attends” = no engagement for 90 days; list shows only those added this week.",
         ],
     }
 
@@ -1803,7 +2228,7 @@ def api_reset_cadence(
         # One-week rebuild (current week only)
         rebuild_person_cadence(db, signals=sigs, rolling_days=DEFAULT_ROLLING_DAYS, as_of=last_sun)
         build_weekly_snapshot(db, week_end=last_sun)
-        payload = detect_and_write_lapses_for_week(last_sun, signals=("attend","give"), inactivity_days_for_drop=180)
+        payload = detect_and_write_lapses_for_week(last_sun, signals=("attend","give"), inactivity_days_for_drop=90)
         return {
             "status": "ok",
             "mode": "current_week_only",
@@ -1847,7 +2272,11 @@ def api_reset_cadence(
     while wk <= last_sunday:
         rebuild_person_cadence(db, signals=sigs, rolling_days=DEFAULT_ROLLING_DAYS, as_of=wk)
         build_weekly_snapshot(db, week_end=wk)
-        detect_and_write_lapses_for_week(wk, signals=("attend","give","serve"), inactivity_days_for_drop=180)
+        
+        write_engagement_tier_transitions(wk)
+        detect_and_write_lapses_for_week(wk, signals=("attend","give"), inactivity_days_for_drop=90)
+        persist_new_nla_events(wk, inactivity_days=90)
+        
         weeks_processed += 1
         wk += timedelta(days=7)
 
@@ -1879,3 +2308,48 @@ def api_weekly_report(
     )
     return {"status": "ok", **report}
 
+@router.get("/backdoor/export/nla.csv")
+def export_nla(week_end: Optional[str] = Query(None)):
+    wk = date.fromisoformat(week_end) if week_end else get_last_sunday_cst()
+    items = _fetch_newly_no_longer_attends(wk, inactivity_days=90)
+    # CSV rows
+    lines = ["person_id,name,email,first_seen_any,last_attend,last_give,last_serve,last_group,last_any"]
+    for i in items:
+        ls = i["last_signals"]
+        lines.append(",".join([
+            i["person_id"],
+            f"\"{i['name']}\"",
+            (i["email"] or ""),
+            (i["first_seen_any"] or ""),
+            (ls.get("attend") or ""),
+            (ls.get("give") or ""),
+            (ls.get("serve") or ""),
+            (ls.get("group") or ""),
+            (ls.get("last_any") or ""),
+        ]))
+    csv = "\n".join(lines)
+    return Response(content=csv, media_type="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename=nla_{wk}.csv"})
+
+@router.get("/backdoor/export/downshifts.csv")
+def export_downshifts(week_end: Optional[str] = Query(None)):
+    wk = date.fromisoformat(week_end) if week_end else get_last_sunday_cst()
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+          SELECT e.person_id, p.first_name, p.last_name, p.email, e.from_tier, e.to_tier, e.campus_id
+          FROM engagement_tier_transitions e
+          JOIN pco_people p ON p.person_id = e.person_id
+          WHERE e.week_end = %s
+          ORDER BY e.from_tier DESC, p.last_name, p.first_name;
+        """, (wk,))
+        rows = cur.fetchall()
+    finally:
+        cur.close(); conn.close()
+
+    lines = ["person_id,name,email,from_tier,to_tier,campus_id"]
+    for pid, fn, ln, email, f, t, campus in rows:
+        lines.append(",".join([pid, f"\"{(fn or '')} {(ln or '')}\"".strip(), email or "", str(f), str(t), campus or ""]))
+    csv = "\n".join(lines)
+    return Response(content=csv, media_type="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename=downshifts_{wk}.csv"})

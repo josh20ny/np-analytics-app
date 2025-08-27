@@ -115,3 +115,9 @@ def people_table(title: str, provider, limit: int = 100, **kwargs):
         st.info("No people to show.")
         return
     st.dataframe(df, use_container_width=True)
+
+def matrix_table(title: str, provider, **kwargs):
+    import streamlit as st
+    df = provider()
+    st.subheader(title)
+    st.dataframe(df.style.format("{:,}"))
