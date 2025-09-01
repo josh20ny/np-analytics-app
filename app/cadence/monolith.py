@@ -14,7 +14,7 @@ import pandas as pd
 from sqlalchemy import text
 from datetime import date as _date, timedelta
 
-from dashboard.data import engine
+from app.db import engine
 
 from app.db import get_conn, get_db
 from app.utils.common import (
@@ -27,12 +27,13 @@ from app.utils.common import (
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/analytics/cadence", tags=["Analytics"])
 
-# Add near other constants
-MIN_SAMPLES_FOR_BUCKET = 2
-DEFAULT_ROLLING_DAYS = 180
-LAPSE_CYCLES_THRESHOLD = 3
-REGULAR_MIN_SAMPLES = 2   
-
+from app.cadence.constants import (
+    MIN_SAMPLES_FOR_BUCKET,
+    DEFAULT_ROLLING_DAYS,
+    LAPSE_CYCLES_THRESHOLD,
+    REGULAR_MIN_SAMPLES,
+    bucket_days,
+)
 
 
 # ─────────────────────────────
@@ -77,7 +78,7 @@ def _missed_cycles(last_seen: Optional[date], bucket_name: str, as_of: date) -> 
     """How many expected cycles have been missed since last_seen (0 if N/A)."""
     if not last_seen:
         return 0
-    d = _bucket_days(bucket_name)
+    d = bucket_days(bucket_name)
     if d <= 0 or bucket_name == "irregular":
         return 0
     expected_next = last_seen + timedelta(days=d)
@@ -113,11 +114,6 @@ def _calc_stats(dates: Sequence[date]) -> CadenceStats:
 
     # Otherwise, snap to the nearest standard bucket
     return CadenceStats(len(uniq), med, _iqr(gaps), _nearest_bucket(med))
-
-
-
-def _bucket_days(name: str) -> int:
-    return {"weekly": 7, "biweekly": 14, "monthly": 30, "6weekly": 42}.get(name, 28)
 
 # ─────────────────────────────
 # DB helpers
@@ -394,7 +390,7 @@ def _build_rows_for_signal(
 
         # Only real cadence buckets get expected/missed
         if last_seen and bucket not in ("irregular", "one_off"):
-            expected = last_seen + timedelta(days=_bucket_days(bucket))
+            expected = last_seen + timedelta(days=bucket_days(bucket))
             missed = _missed_cycles(last_seen, bucket, as_of)
         else:
             expected = None
@@ -888,10 +884,6 @@ def _insert_lapse_events(week_end: date, candidates: list[tuple]) -> list[dict]:
     finally:
         cur.close(); conn.close()
 
-
-def _bucket_days(bucket: str) -> int:
-    return {"weekly": 7, "biweekly": 14, "monthly": 28, "6weekly": 42}.get(bucket, 9999)
-
 def _engaged_flag_for_signal_col(signal: str) -> str:
     return {
         "attend": "attended_bool",
@@ -1029,7 +1021,7 @@ def detect_and_write_lapses_for_week(
         # Build insert rows
         candidates = []
         for pid, sig, bucket, last_seen, expected, missed in newly_rows:
-            exp = expected or (last_seen + timedelta(days=_bucket_days(bucket)) if last_seen and bucket else None)
+            exp = expected or (last_seen + timedelta(days=bucket_days(bucket)) if last_seen and bucket else None)
             obs = last_seen
             candidates.append((pid, sig, exp, obs, missed))
     finally:
