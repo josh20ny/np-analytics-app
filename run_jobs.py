@@ -124,21 +124,36 @@ def _json_or_empty(raw: str) -> dict:
         return {"error": "invalid JSON", "raw": (raw or "")[:3000]}
 
 # ── Cadence readiness polling (ensures DM has people lists) ───────────────────
-def fetch_cadence_report(last_sun: datetime.date, tries: int = 8, wait_s: int = 10) -> dict:
-    """Poll weekly-report until engaged/front_door/lapses appear (bounded)."""
-    qs = f"?week_end={last_sun.isoformat()}&ensure_snapshot=true&persist_front_door=true"
-    endpoint = f"/analytics/cadence/weekly-report{qs}"
-    raw = ""
+def fetch_cadence_report(target_sunday: str, tries: int = 8, wait_s: int = 10) -> dict:
+    """
+    Poll for the cadence weekly-report once the JSON includes the expected keys.
+    Note: an empty 'lapses' list is valid and should be considered ready.
+    """
+    last_raw = ""
     for attempt in range(1, tries + 1):
+        ensure = "true" if attempt == 1 else "false"          # build snapshot once
+        persist = "true" if attempt == 1 else "false"
+        endpoint = (
+            f"/analytics/cadence/weekly-report?"
+            f"week_end={target_sunday}&ensure_snapshot={ensure}&persist_front_door={persist}"
+        )
         raw = call_job(endpoint, "Cadence weekly report", TIMEOUTS.get("Cadence weekly report"))
+        last_raw = raw or last_raw
         data = _json_or_empty(raw)
-        if isinstance(data, dict) and data.get("engaged") and data.get("front_door") and data.get("lapses"):
-            log.info("✅ Cadence report ready on attempt %d", attempt)
-            return data
+
+        if isinstance(data, dict):
+            has_keys = all(k in data for k in ("engaged", "front_door", "lapses"))
+            right_week = (data.get("week_end") == target_sunday)
+            if has_keys and right_week:
+                log.info("✅ Cadence report ready on attempt %d", attempt)
+                return data
+
         log.info("⏳ Cadence report not ready (attempt %d/%d) – waiting %ss", attempt, tries, wait_s)
         time.sleep(wait_s)
+
     log.warning("⚠️ Cadence report missing sections after %d attempts; proceeding with best effort.", tries)
-    return _json_or_empty(raw)
+    return _json_or_empty(last_raw)
+
 
 # ── Pipeline: facts first → cadence last (blocking) ───────────────────────────
 def run_weekly_pipeline() -> dict:
@@ -264,7 +279,6 @@ def main():
         ("/planning-center/serving/summary", "Planning Center Volunteer Summary"),
         ("/youtube/livestreams", "YouTube livestream tracking"),
         ("/youtube/weekly-summary", "YouTube weekly summary"),
-        (f"/analytics/cadence/weekly-report?week_end={last_sun}&ensure_snapshot=true", "Cadence weekly report"),
         ("/mailchimp/weekly-summary", "Mailchimp weekly summary"),
     ]
 

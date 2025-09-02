@@ -20,22 +20,15 @@ def _fmt_int(n) -> str:
         return "—"
 
 def _metric_with_yoy(col, label: str, cur_val, prev_val, *, as_money: bool = False):
-    # delta text
-    if prev_val in (None, 0) or cur_val in (None, float("nan")):
-        delta_str = "–"
-    else:
+    # compute numeric delta %
+    delta_pct = None
+    if prev_val not in (None, 0) and cur_val not in (None, float("nan")):
         try:
-            delta = (float(cur_val) - float(prev_val)) / float(prev_val) * 100.0
-            if abs(delta) < 1e-9:
-                delta_str = "–"
-            elif delta > 0:
-                delta_str = f"▲ {delta:.1f}%"
-            else:
-                delta_str = f"▼ {abs(delta):.1f}%"
+            delta_pct = (float(cur_val) - float(prev_val)) / float(prev_val) * 100.0
         except Exception:
-            delta_str = "–"
+            delta_pct = None
 
-    # value text
+    # format value
     if as_money:
         val_str = _fmt_money(cur_val) if cur_val is not None else "—"
     else:
@@ -44,7 +37,11 @@ def _metric_with_yoy(col, label: str, cur_val, prev_val, *, as_money: bool = Fal
         except Exception:
             val_str = "—"
 
-    col.metric(label, val_str, delta_str)
+    # hand Streamlit a signed % (no custom arrows)
+    if delta_pct is None or abs(delta_pct) < 1e-9:
+        col.metric(label, val_str, "–")
+    else:
+        col.metric(label, val_str, f"{delta_pct:+.1f}%")
 
 
 def _one_row(sql: str, parse_dates=None):
