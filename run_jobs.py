@@ -151,10 +151,8 @@ def run_weekly_pipeline() -> dict:
         (f"/planning-center/groups/sync?since={last_mon}", "Groups/memberships sync"),
         (f"/planning-center/serving/sync?since={last_mon}", "Serving teams/memberships sync"),
         (f"/planning-center/checkins?date={last_sun}", "Check-ins ingest (last Sunday)"),
-        # giving endpoint already computes last full week; we pin week_end to be explicit
         (f"/planning-center/giving/weekly-summary?week_end={last_sun}", "Giving summary (last full week)"),
-        (f"/analytics/cadence/rebuild?signals=attend,give,group,serve&since={last_mon}&rolling_days=180&week_end={last_sun}",
-         "Cadence rebuild"),
+        (f"/analytics/cadence/rebuild?signals=attend,give,group,serve&since={last_mon}&rolling_days=180&week_end={last_sun}","Cadence rebuild"),
         (f"/analytics/cadence/snap-week?week_end={last_sun}", "Cadence snapshot"),
     ]
 
@@ -264,11 +262,10 @@ def main():
         (f"/planning-center/giving/weekly-summary?week_end={last_sun}", "Planning Center Giving Summary"),
         ("/planning-center/groups", "Planning Center Groups"),
         ("/planning-center/serving/summary", "Planning Center Volunteer Summary"),
-        ("/youtube/weekly-summary", "YouTube weekly summary"),
         ("/youtube/livestreams", "YouTube livestream tracking"),
+        ("/youtube/weekly-summary", "YouTube weekly summary"),
         (f"/analytics/cadence/weekly-report?week_end={last_sun}&ensure_snapshot=true", "Cadence weekly report"),
-        # You can add Mailchimp here too if you want it captured:
-        # ("/mailchimp/weekly-summary", "Mailchimp weekly summary"),
+        ("/mailchimp/weekly-summary", "Mailchimp weekly summary"),
     ]
 
     outputs: dict[str, object] = {}
