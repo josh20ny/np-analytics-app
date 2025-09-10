@@ -17,6 +17,13 @@ from app.planning_center.oauth_routes import get_pco_headers
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/planning-center/checkins", tags=["Planning Center"])
 
+# Half-open intervals prevent boundary ambiguity (e.g., exactly 10:30)
+SERVICE_WINDOWS = {
+    "9:30 AM":  (time(8, 00),  time(10, 20)),  # [08:00, 10:20)
+    "11:00 AM": (time(10, 20), time(12, 15)),  # [10:20, 12:15)
+    "4:30 PM":  (time(15, 15), time(17, 30)),  # [15:15, 17:30)
+}
+
 # Map service labels to summary keys
 SERVICE_KEY_MAP = {
     "9:30 AM":  "930",
@@ -279,28 +286,15 @@ def determine_ministry(grade: int | None, age: int | None) -> str | None:
     return None
 
 
-def determine_service_time(dt: datetime, ministry: str) -> str | None:
-    """
-    Given event start/check-in time, return service slot ONLY if it's valid for that ministry.
-    """
-    if dt is None:
-        return None
-
-    t = dt.time()
-
-    # InsideOut always counted at 4:30 PM if present
+def determine_service_time(dt, ministry) -> str | None:
+    """Return '9:30 AM' | '11:00 AM' | '4:30 PM' | None using half-open windows."""
+    # Student service stays explicit
     if ministry == "InsideOut":
         return "4:30 PM"
-
-    # General windows
-    if time(15, 15) <= t <= time(17, 30):
-        return "4:30 PM"
-    else:
-        if time(8, 0) <= t <= time(10, 15):
-            return "9:30 AM"
-        if time(10, 15) <= t <= time(12, 30):
-            return "11:00 AM"
-
+    t = dt.time()
+    for label, (start, end) in SERVICE_WINDOWS.items():
+        if start <= t < end:
+            return label
     return None
 
 
@@ -536,6 +530,7 @@ def summarize_checkins_by_ministry(
             # Keep behavior: skip hard errors on a single row
             continue
 
+    persist_skip_audit(skip_details)
     result = {
         "breakdown": {k: v["breakdown"] for k, v in summary.items()},
         "uncounted_reasons": skipped,
@@ -580,6 +575,32 @@ def insert_summary_into_db(ministry: str, data: dict):
         cur.close()
         conn.close()
 
+def persist_skip_audit(rows: list[dict]) -> None:
+    """rows: [{svc_date, person_id, reason, ministry, event_id, campus_id, raw_name, email, phone}]"""
+    if not rows:
+        return
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO checkins_skip_audit
+              (svc_date, person_id, reason, ministry, event_id, campus_id, raw_name, email, phone)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            [
+              (
+                r.get("svc_date"),
+                r.get("person_id"),
+                r.get("reason"),
+                r.get("ministry"),
+                r.get("event_id"),
+                r.get("campus_id"),
+                r.get("raw_name"),
+                r.get("email"),
+                r.get("phone"),
+              ) for r in rows
+            ],
+        )
+        conn.commit()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Route (name intact)

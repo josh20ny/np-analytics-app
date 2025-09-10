@@ -442,7 +442,7 @@ def downshifts_rows(week_end: date) -> List[Tuple]:
           SELECT e.person_id, p.first_name, p.last_name, p.email, e.from_tier, e.to_tier, e.campus_id
           FROM engagement_tier_transitions e
           JOIN pco_people p
-                 ON p.person_id::text = e.person_id::text
+                 ON p.person_id = e.person_id
           WHERE e.week_end = %s AND e.from_tier > e.to_tier
           ORDER BY e.from_tier DESC, e.to_tier ASC, p.last_name, p.first_name;
         """, (week_end,))
@@ -460,7 +460,7 @@ def nla_rows(week_end: date) -> List[Tuple]:
     try:
         cur.execute("""
           SELECT
-            p.person_id::text,
+            p.person_id,
             COALESCE(p.first_name,'') || ' ' || COALESCE(p.last_name,'') AS name,
             p.email,
             nl.first_seen_any,
@@ -471,7 +471,7 @@ def nla_rows(week_end: date) -> List[Tuple]:
             nl.last_any
           FROM no_longer_attends_flat nl
           JOIN pco_people p
-                 ON p.person_id::text = nl.person_id::text
+                 ON p.person_id = nl.person_id
           WHERE nl.week_end = %s
           ORDER BY nl.last_any NULLS LAST, p.last_name, p.first_name;
         """, (week_end,))
@@ -616,7 +616,7 @@ def detect_and_upsert_lapses_for_week(week_end: date) -> dict:
 
     # Engaged 0 this week
     cur.execute("""
-      SELECT person_id::text
+      SELECT person_id
       FROM snap_person_week
       WHERE week_end = %s AND engaged_tier = 0
     """, (week_end,))
@@ -624,7 +624,7 @@ def detect_and_upsert_lapses_for_week(week_end: date) -> dict:
 
     # Already lapsed at any prior week (used to filter to "newly" this week)
     cur.execute("""
-      SELECT person_id::text, signal
+      SELECT person_id, signal
       FROM lapses_weekly
       WHERE week_end < %s
     """, (week_end,))
@@ -632,13 +632,13 @@ def detect_and_upsert_lapses_for_week(week_end: date) -> dict:
 
     # Current lapse candidates (as of this week_end)
     cur.execute("""
-      SELECT pc.person_id::text, pc.signal, pc.bucket,
+      SELECT pc.person_id, pc.signal, pc.bucket,
              COALESCE(pc.missed_cycles,0) AS missed_cycles,
              pc.last_seen_date, pc.expected_next_date,
              p.household_id
       FROM person_cadence pc
       JOIN pco_people p
-        ON p.person_id::text = pc.person_id::text
+        ON p.person_id = pc.person_id
       WHERE pc.bucket NOT IN ('irregular','one_off')
         AND COALESCE(pc.missed_cycles,0) >= 3
     """)
@@ -673,12 +673,12 @@ def fetch_new_lapses_for_week(week_end: date, limit: int = 100) -> list[dict]:
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute("""
-          SELECT l.person_id::text,
+          SELECT l.person_id,
                  COALESCE(p.first_name,'') || ' ' || COALESCE(p.last_name,'') AS name,
                  p.email, l.signal, l.bucket, l.missed_cycles, l.last_seen_date, l.expected_next_date
           FROM lapses_weekly l
           JOIN pco_people p
-                 ON p.person_id::text = l.person_id::text
+                 ON p.person_id = l.person_id
           WHERE l.week_end = %s
           ORDER BY l.signal, l.missed_cycles DESC, p.last_name, p.first_name
           LIMIT %s;
@@ -708,22 +708,6 @@ def nla_count(week_end: date) -> int:
     finally:
         cur.close(); conn.close()
 
-def _nla_pid_cast_sql(cur) -> str:
-    # returns "person_id::bigint" or "person_id::text" depending on the table column type
-    cur.execute("""
-      SELECT data_type
-      FROM information_schema.columns
-      WHERE table_schema = current_schema()
-        AND table_name = 'no_longer_attends_flat'
-        AND column_name = 'person_id'
-      LIMIT 1;
-    """)
-    row = cur.fetchone()
-    dtype = (row[0] if row else "text").lower()
-    if "bigint" in dtype or dtype in ("integer", "int8"):
-        return "person_id::bigint"
-    return "person_id::text"
-
 def refresh_no_longer_attends_flat(week_end: date, inactivity_days: int = 180) -> int:
     """
     Rebuild NLA flat rows for week_end from snapshots.
@@ -733,7 +717,6 @@ def refresh_no_longer_attends_flat(week_end: date, inactivity_days: int = 180) -
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute("DELETE FROM no_longer_attends_flat WHERE week_end = %s;", (week_end,))
-        pid_cast = _nla_pid_cast_sql(cur)  # ← decide cast once
 
         cur.execute(f"""
           WITH act AS (
@@ -763,7 +746,7 @@ def refresh_no_longer_attends_flat(week_end: date, inactivity_days: int = 180) -
           )
           INSERT INTO no_longer_attends_flat
             (week_end, person_id, first_seen_any, last_attend, last_give, last_serve, last_group, last_any)
-          SELECT %s, {pid_cast}, first_seen_any, last_attend, last_give, last_serve, last_group, last_any
+          SELECT %s, person_id, first_seen_any, last_attend, last_give, last_serve, last_group, last_any
           FROM agg
           WHERE last_any IS NOT NULL
             AND last_any <= %s - INTERVAL '%s days';
@@ -779,13 +762,13 @@ def sample_nla(week_end: date, limit: int = 100) -> list[dict]:
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute("""
-          SELECT f.person_id::text,
+          SELECT f.person_id,
                  COALESCE(p.first_name,'') || ' ' || COALESCE(p.last_name,'') AS name,
                  p.email,
                  f.first_seen_any, f.last_attend, f.last_give, f.last_serve, f.last_group, f.last_any
           FROM no_longer_attends_flat f
           JOIN pco_people p
-                 ON p.person_id::text = f.person_id::text
+                 ON p.person_id = f.person_id
           WHERE f.week_end = %s
           ORDER BY f.last_any NULLS LAST, p.last_name, p.first_name
           LIMIT %s;
@@ -813,12 +796,12 @@ def person_profile(person_id: str) -> Dict:
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute("""
-          SELECT person_id::text,
+          SELECT person_id,
                  COALESCE(first_name,'') AS first_name,
                  COALESCE(last_name,'')  AS last_name,
                  email
           FROM pco_people
-          WHERE person_id::text = %s
+          WHERE person_id = %s
         """, (str(person_id),))
         row = cur.fetchone()
         if not row:
@@ -835,7 +818,7 @@ def person_cadences(person_id: str) -> List[Dict]:
           SELECT signal, bucket, samples_n, median_interval_days, iqr_days,
                  last_seen_date, expected_next_date, COALESCE(missed_cycles,0) AS missed_cycles
           FROM person_cadence
-          WHERE person_id::text = %s
+          WHERE person_id = %s
           ORDER BY signal
         """, (str(person_id),))
         out = []
@@ -867,7 +850,7 @@ def person_recent_weeks(person_id: str, *, days: int, as_of: Optional[date] = No
                  in_group_ontrack_bool,
                  engaged_tier
           FROM snap_person_week
-          WHERE person_id::text = %s
+          WHERE person_id = %s
             AND week_end BETWEEN %s AND %s
           ORDER BY week_end DESC
         """, (str(person_id), start, as_of))

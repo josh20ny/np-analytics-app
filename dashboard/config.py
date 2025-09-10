@@ -170,13 +170,11 @@ TAB_CONFIG = {
         {"loader": ("__service__", "ignored", None),
          "widget": people_table,
          "args": {"title": "New 'No Longer Attends' (90 days)", "provider": get_new_nla_people, "limit": 200}},
+         
         # Pie: where did drops start?
         {"loader": ("__service__", "ignored", None),
         "widget": pie_chart_from_provider,
         "args": {"title": "Down-shifts by Starting Tier", "provider": get_downshifts_from_pie}},
-
-
-
 
         # Matrix: From → To
         {"loader": ("__service__", "ignored", None),
