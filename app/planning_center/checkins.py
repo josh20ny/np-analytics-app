@@ -410,6 +410,10 @@ def summarize_checkins_by_ministry(
                         "name": f"{pinfo.get('first_name','')} {pinfo.get('last_name','')}".strip(),
                         "email": pinfo.get("email_address") or pinfo.get("email"),
                         "phone": pinfo.get("phone_number") or pinfo.get("mobile_phone"),
+                        "svc_date": svc_date,
+                        "ministry": None,
+                        "event_id": evt_id,
+                        "raw_name": raw_name,
                     })
                     continue
 
@@ -423,6 +427,9 @@ def summarize_checkins_by_ministry(
                     "name": f"{pinfo.get('first_name','')} {pinfo.get('last_name','')}".strip(),
                     "email": pinfo.get("email_address") or pinfo.get("email"),
                     "phone": pinfo.get("phone_number") or pinfo.get("mobile_phone"),
+                    "svc_date": svc_date,
+                    "ministry": ministry,
+                    "event_id": evt_id,
                 })
                 continue
             key = SERVICE_KEY_MAP[svc]  # e.g., "930" | "1100" | "1630"
@@ -437,6 +444,9 @@ def summarize_checkins_by_ministry(
                     "name": f"{pinfo.get('first_name','')} {pinfo.get('last_name','')}".strip(),
                     "email": pinfo.get("email_address") or pinfo.get("email"),
                     "phone": pinfo.get("phone_number") or pinfo.get("mobile_phone"),
+                    "svc_date": svc_date,
+                    "ministry": ministry,
+                    "event_id": evt_id,
                 })
                 continue
             already_counted.add(checkin_key)
@@ -588,7 +598,7 @@ def persist_skip_audit(rows: list[dict]) -> None:
             """,
             [
               (
-                r.get("svc_date"),
+                r.get("svc_date") or datetime.now(ZoneInfo("America/Chicago")).date(),
                 r.get("person_id"),
                 r.get("reason"),
                 r.get("ministry"),
