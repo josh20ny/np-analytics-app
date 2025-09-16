@@ -16,6 +16,7 @@ from app.planning_center.oauth_routes import router as pco_oauth_router
 from app.planning_center.people import router as people_router
 from app.planning_center.serving import router as serving_router
 from app.cadence import router as cadence_router
+from app.planning_center.checkins_location_model.routes import router as checkins_location_router
 
 
 
@@ -32,6 +33,7 @@ from app.youtube.routes import router as youtube_router
 # from app.debug.routes import router as debug_router
 
 import logging, sys
+import os, asyncpg
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
@@ -47,6 +49,18 @@ logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 
 
 app = FastAPI(title="NP Analytics", version="1.0.0")
+
+@app.on_event("startup")
+async def startup():
+    app.state.db_pool = await asyncpg.create_pool(
+        os.getenv("DATABASE_URL"), 
+        min_size=1,
+        max_size=10,
+        statement_cache_size=0,)
+
+@app.on_event("shutdown")
+async def shutdown():
+    await app.state.db_pool.close()
 
 # Healthcheck
 @app.get("/healthz")
@@ -67,6 +81,7 @@ app.include_router(pco_oauth_router)
 app.include_router(people_router)
 app.include_router(serving_router)
 app.include_router(cadence_router)
+app.include_router(checkins_location_router)
 
 # ClickUp
 app.include_router(clickup_webhooks_router)
