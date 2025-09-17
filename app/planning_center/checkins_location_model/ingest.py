@@ -1,14 +1,19 @@
 # app/planning_center/checkins_location_model/ingest.py
-from typing import Any, Dict, Tuple, Optional, Sequence, List
-from datetime import datetime, timezone
+from __future__ import annotations
+
+from typing import Any, Dict, Tuple, Optional, Sequence, List, Set
+from datetime import datetime, timezone, date
 import logging
 import asyncpg
 import json
+from zoneinfo import ZoneInfo
 
 log = logging.getLogger(__name__)
 
 # Bump to bust any prepared-statement caches after deploys
-_SQL_VERSION = "v9"
+_SQL_VERSION = "v11"
+
+LOCAL_TZ = ZoneInfo("America/Chicago")
 
 # --- SQL ---------------------------------------------------------------------------
 
@@ -68,22 +73,46 @@ def _rel_id(rel: dict) -> Optional[str]:
     return None
 
 async def exec_debug(conn: asyncpg.Connection, sql: str, *params: Sequence[object]):
-    """
-    Quiet execution helper:
-      - On success: no console output.
-      - On error: prints succinct details, then re-raises.
-    """
+    """Execute SQL and print succinct diagnostics on error."""
     try:
         return await conn.execute(sql, *params)
     except Exception as e:
         print("=== EXECUTE FAILED ===")
-        print("SQL:", sql.splitlines()[0], "...")  # first line only
+        print("SQL:", sql.splitlines()[0], "...")
         print("ERROR:", repr(e))
         print("PARAM_TYPES:", [type(p).__name__ for p in params])
         raise
 
 def _s(v: Optional[Any], default: str = "") -> str:
     return v if isinstance(v, str) else default
+
+def _normalize_service_bucket(label: Optional[str]) -> str:
+    """
+    Canonicalize to '9:30 AM' | '11:00 AM' | '4:30 PM'.
+    Accept legacy numeric strings and 'unknown'.
+    """
+    if not isinstance(label, str):
+        return ""
+    x = label.strip()
+    if x in ("930", "9:30", "9:30 AM"):
+        return "9:30 AM"
+    if x in ("1100", "11:00", "11:00 AM"):
+        return "11:00 AM"
+    if x in ("1630", "4:30", "4:30 PM"):
+        return "4:30 PM"
+    if x.lower() == "unknown":
+        return ""
+    return x
+
+def _normalize_ministry_key(k: Optional[str]) -> str:
+    if not isinstance(k, str):
+        return "UNKNOWN"
+    low = k.strip().lower()
+    if low in ("insideout", "inside out", "io"): return "InsideOut"
+    if low in ("upstreet", "up street"):          return "UpStreet"
+    if low in ("waumbaland", "waumba", "waumba land"): return "WaumbaLand"
+    if low == "transit":                           return "Transit"
+    return k.strip() or "UNKNOWN"
 
 # Optional schema probe (only emits on DEBUG level)
 async def _probe_schema(conn: asyncpg.Connection):
@@ -103,6 +132,35 @@ async def _probe_schema(conn: asyncpg.Connection):
     except Exception as e:
         log.debug("SCHEMA PROBE FAILED: %r", e)
 
+def _person_created_dates_local(included: List[dict]) -> Dict[str, date]:
+    """
+    Map person_id -> America/Chicago creation DATE from Person.created_at in page 'included'.
+    """
+    from .derive import _ts
+    out: Dict[str, date] = {}
+    for item in included or []:
+        if (item.get("type") or "") == "Person":
+            pid = item.get("id")
+            iso = ((item.get("attributes") or {}).get("created_at"))
+            dt = _ts(iso)
+            if pid and dt:
+                out[pid] = dt.astimezone(LOCAL_TZ).date()
+    return out
+
+async def _already_marked_new_for_day(conn: asyncpg.Connection, pid: str, d: date) -> bool:
+    """
+    Avoid marking 'new' multiple times if we re-run or ingest in multiple passes.
+    """
+    q = """
+    SELECT 1
+    FROM pco_checkins_raw
+    WHERE person_id = $1
+      AND (starts_at AT TIME ZONE 'America/Chicago')::date = $2
+      AND new_flag
+    LIMIT 1
+    """
+    return (await conn.fetchval(q, pid, d)) is not None
+
 # --- main -------------------------------------------------------------------------
 
 async def ingest_checkins_payload(
@@ -118,13 +176,20 @@ async def ingest_checkins_payload(
     """
     await _probe_schema(conn)
 
-    from .derive import _ts, choose_event_time_for_checkin, derive_service_bucket, derive_ministry_key
+    from .derive import (
+        _ts,
+        choose_event_time_for_checkin,
+        derive_service_bucket,
+        derive_ministry_key,
+        derive_ministry_from_chain,
+        service_from_location_chain,
+    )
     from .locations import upsert_locations_from_payload
 
     placed = 0
     unplaced = 0
 
-    # Keep locations dimension in sync from the page (as before)
+    # Keep locations dimension in sync from the page
     await upsert_locations_from_payload(conn, payload)
 
     # Reason counters (compact end-of-run summary only)
@@ -137,6 +202,54 @@ async def ingest_checkins_payload(
 
     included: List[dict] = payload.get("included") or []
     idx = {((o.get("type") or ""), (o.get("id") or "")): o for o in included}
+
+    # Person.created_at map (local DATE) & a run-local de-dupe set
+    person_created_local = _person_created_dates_local(included)
+    run_new_seen: Set[tuple[str, date]] = set()
+
+    # --- Helper: fetch ancestor chain for a location_id (root at the end)
+    CHAIN_SQL = """
+    WITH RECURSIVE chain AS (
+      SELECT l.location_id, l.parent_id, l.name, l.location_id AS start_id, 0 AS depth
+      FROM pco_locations l WHERE l.location_id = ANY($1::text[])
+      UNION ALL
+      SELECT p.location_id, p.parent_id, p.name, chain.start_id, chain.depth + 1
+      FROM pco_locations p
+      JOIN chain ON chain.parent_id = p.location_id
+    )
+    SELECT start_id, array_agg(name ORDER BY depth ASC) AS chain
+    FROM chain
+    GROUP BY start_id
+    """
+
+    async def chains_for(ids: List[str]) -> Dict[str, List[str]]:
+        if not ids:
+            return {}
+        rows = await conn.fetch(CHAIN_SQL, ids)
+        return {r["start_id"]: r["chain"] for r in rows}
+
+    chain_cache: Dict[str, List[str]] = {}
+
+    def chain_from_included(idx_map: Dict[tuple, dict], loc_id: Optional[str]) -> List[str]:
+        """Build a name chain [root..leaf] by walking included Location.parent links."""
+        if not loc_id:
+            return []
+        names: List[str] = []
+        seen: set[str] = set()
+        cur = loc_id
+        steps = 0
+        while isinstance(cur, str) and cur and cur not in seen and steps < 12:
+            seen.add(cur); steps += 1
+            loc = idx_map.get(("Location", cur))
+            if not isinstance(loc, dict):
+                break
+            nm = ((loc.get("attributes") or {}).get("name") or "").strip()
+            if nm:
+                names.append(nm)
+            rel = (loc.get("relationships") or {}).get("parent") or {}
+            cur = ((rel.get("data") or {}) or {}).get("id")
+        names.reverse()
+        return names
 
     for row in (payload.get("data") or []):
         if (row.get("type") or "").lower() != "checkin":
@@ -171,7 +284,6 @@ async def ingest_checkins_payload(
             try:
                 location_id, fetched_locs = await client.get_checkin_locations(checkin_id)
             except Exception:
-                # We'll unplace if still missing after this step
                 pass
 
         # Pull location name from included or fetched
@@ -183,15 +295,40 @@ async def ingest_checkins_payload(
             except Exception:
                 pass
 
+        # Resolve full ancestor chain (for ministry + Transit service)
+        chain: List[str] = []
+        if location_id:
+            cached = chain_cache.get(location_id)
+            if cached is not None:
+                chain = cached
+            else:
+                try:
+                    chain_map = await chains_for([location_id])
+                    chain = chain_map.get(location_id) or []
+                except Exception:
+                    chain = []
+                if not chain:
+                    chain = chain_from_included(idx, location_id)
+                if not chain and location_name:
+                    chain = [location_name]
+                chain_cache[location_id] = chain
+
+        root_name = chain[-1] if chain else ""
+
         # --- EVENT TIME / SERVICE BUCKET (only call /check_in_times if needed) --
         # 1) Try included evt_time id first (rare), else choose from schedule
         evt_time = idx.get(("EventTime", evt_time_id)) if evt_time_id else None
         if not evt_time:
             evt_time = choose_event_time_for_checkin(idx, created_at)
 
-        # 2) Derive from the best evt_time we have so far
-        svc_label_val = derive_service_bucket(evt_time, created_at)
-        svc_label = svc_label_val if isinstance(svc_label_val, str) else ""
+        # 2) Derive from the best evt_time we have so far (normalized to AM/PM buckets)
+        svc_label = derive_service_bucket(evt_time, created_at) or ""
+
+        # 2b) Transit models service as a location (e.g., "9:30 Service") → prefer chain hint
+        if not svc_label:
+            chain_hint = service_from_location_chain(chain or [])
+            if chain_hint:
+                svc_label = chain_hint
 
         # 3) Only if we STILL don't have a bucket, call /check_in_times for this checkin
         if not svc_label and checkin_id:
@@ -218,9 +355,30 @@ async def ingest_checkins_payload(
                     svc_label_val = derive_service_bucket(evt_time, created_at)
                     svc_label = svc_label_val if isinstance(svc_label_val, str) else ""
 
-        # Compute ministry and new_flag after we resolved location_name
-        ministry_key = derive_ministry_key(location_name or "") or "UNKNOWN"
-        new_flag = bool(a.get("first_time")) or bool(a.get("new"))
+        # Final normalized bucket label
+        svc_label = _normalize_service_bucket(svc_label)
+
+        # Compute ministry from the *chain root* then normalize
+        ministry_key = (
+            derive_ministry_from_chain(chain) or
+            derive_ministry_key(" > ".join(chain) or root_name or location_name or "") or
+            "UNKNOWN"
+        )
+        ministry_key = _normalize_ministry_key(ministry_key)
+
+        # --- NEW FLAG (strict Person.created_at local-date equality)
+        new_flag = False
+        if person_id:
+            svc_local_date = created_at.astimezone(LOCAL_TZ).date()
+            p_created_date = person_created_local.get(person_id)
+            if p_created_date == svc_local_date:
+                # run-level de-dupe first
+                key = (person_id, svc_local_date)
+                if key not in run_new_seen:
+                    # cross-run de-dupe (DB) to be safe
+                    if not await _already_marked_new_for_day(conn, person_id, svc_local_date):
+                        new_flag = True
+                        run_new_seen.add(key)
 
         # --- Guards (AFTER resolution steps) -----------------------------------
         if (not isinstance(location_id, str)) or (not location_id):
@@ -255,7 +413,7 @@ async def ingest_checkins_payload(
             _s(event_id, ""),             # $3::text
             _s(location_id, "UNKNOWN"),   # $4::text
             svc_label,                    # $5::text
-            created_at,                   # $6::timestamptz (starts_at per derive)
+            created_at,                   # $6::timestamptz (we use check-in timestamp as starts_at)
             created_at,                   # $7::timestamptz (created_at_pco)
             bool(new_flag),               # $8::bool
             _s(ministry_key, "UNKNOWN"),  # $9::text
@@ -281,5 +439,6 @@ async def ingest_checkins_payload(
         placed += 1
 
     # Compact end-of-run summary (single line)
-    print("=== UNPLACED SUMMARY ===", reason_counts)
+    print("=== UNPLACED SUMMARY ===", reason_counts,
+          "| persons_included:", sum(1 for i in (payload.get("included") or []) if (i.get("type") or "") == "Person"))
     return placed, unplaced

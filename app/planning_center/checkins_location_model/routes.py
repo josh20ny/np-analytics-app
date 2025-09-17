@@ -20,6 +20,7 @@ from .locations import upsert_locations_from_payload
 from app.planning_center.checkins_location_model.ingest import ingest_checkins_payload as _ingest_payload
 
 import inspect, logging
+from .client import acquire, PCOCheckinsClient
 
 log = logging.getLogger(__name__)
 
@@ -51,39 +52,46 @@ def _iso_day_bounds(d: date) -> tuple[str, str]:
 @router.post("/ingest-day")
 async def ingest_for_day(
     request: Request,
-    svc_date: Optional[date] = None,
+    svc_date: date = Query(..., description="Local (America/Chicago) date"),
     per_page: int = Query(200, ge=1, le=200),
-    skip_raw: bool = Query(False),                 # <-- thread this flag through
+    skip_raw: bool = Query(False),
     db_sess: Session = Depends(get_db),
-) -> Dict[str, Any]:
-    db = _pool_or_conn(request)
-    if svc_date is None:
-        svc_date = date.today()
-    gte, lte = _iso_day_bounds(svc_date)
+):
+    # Build the client from your DB-backed OAuth
+    async def get_bearer():
+        return await _get_pco_bearer(db_sess)
+    client = PCOCheckinsClient(get_bearer)
 
-    # Prove which function we’re calling & whether skip_raw is set
-    src_file = inspect.getsourcefile(ingest_checkins_payload)
-    src_line = inspect.getsourcelines(ingest_checkins_payload)[1]
-    log.error("[ROUTE CALL] ingest_checkins_payload from %s#%s skip_raw=%s", src_file, src_line, skip_raw)
+    gte = f"{svc_date}T00:00:00Z"
+    lte = f"{svc_date}T23:59:59Z"
 
-    try:
-        # IMPORTANT: use your existing OAuth helper (returns headers dict)
-        client = PCOCheckinsClient(lambda: get_pco_headers(db_sess))
+    placed = unplaced = 0
 
-        placed_total = 0
-        unplaced_total = 0
-        async for page in client.paginate_check_ins(created_at_gte=gte, created_at_lte=lte, per_page=per_page):
-            async with acquire(db) as conn:
-                p, u = await ingest_checkins_payload(conn, page, client=client, skip_raw=skip_raw)
-                placed_total += p
-                unplaced_total += u
+    # All-day pass
+    async for page in client.paginate_check_ins(
+        created_at_gte=gte,
+        created_at_lte=lte,
+        per_page=per_page,
+        include="locations,event_times,location_label,person",
+    ):
+        async with acquire(_pool_or_conn(request)) as conn:
+            p, u = await ingest_checkins_payload(conn, page, client=client, skip_raw=skip_raw)
+            placed += p; unplaced += u
 
-        return {"ok": True, "date": str(svc_date), "placed": placed_total, "unplaced": unplaced_total}
-    except HTTPException:
-        raise
-    except Exception as e:
-        # Surface the real error so we can see what’s wrong
-        raise HTTPException(502, f"ingest failed: {e}")
+    # PM safety net (InsideOut / 4:30 PM)
+    pm_gte = f"{svc_date}T20:00:00Z"   # ~3:00 PM CT
+    pm_lte = f"{svc_date}T23:59:59Z"
+    async for page in client.paginate_check_ins(
+        created_at_gte=pm_gte,
+        created_at_lte=pm_lte,
+        per_page=per_page,
+        include="locations,event_times,location_label,person",
+    ):
+        async with acquire(_pool_or_conn(request)) as conn:
+            p, u = await ingest_checkins_payload(conn, page, client=client, skip_raw=skip_raw)
+            placed += p; unplaced += u
+
+    return {"placed": placed, "unplaced": unplaced}
 
 
 @router.post("/ingest-range")
@@ -97,7 +105,7 @@ async def ingest_range(
     cur = start
     results = []
     while cur <= end:
-        res = await ingest_for_day(request, svc_date=cur, per_page=per_page, db_sess=db_sess)
+        res = await ingest_for_day(request, svc_date=cur, per_page=per_page, skip_raw=False, db_sess=db_sess)
         results.append(res)
         cur = cur + timedelta(days=1)
     return {"ok": True, "days": results}
@@ -122,6 +130,17 @@ async def sync_locations(
             await upsert_locations_from_payload(conn, page)
             processed += len(page.get("included") or [])
     return {"ok": True, "included_processed": processed}
+
+@router.post("/rollup-day")
+async def rollup_day_endpoint(
+    request: Request,
+    svc_date: date = Query(..., description="Local (America/Chicago) date to roll up"),
+):
+    db = _pool_or_conn(request)  # <-- asyncpg
+    async with acquire(db) as conn:
+        rows = await rollup_day(conn, svc_date)
+    return {"date": str(svc_date), "rows_inserted": rows}
+
 
 
 @router.get("/health")

@@ -54,56 +54,51 @@ class PCOCheckinsClient:
         raise RuntimeError(f"OAuth getter returned unsupported type: {type(v).__name__}")
 
     async def _maybe_await(self, v):
-        # await coroutines; otherwise pass through
-        if callable(getattr(v, "__await__", None)):
-            return await v
-        return v
-
-    async def _maybe_await(self, v):
         if callable(getattr(v, "__await__", None)):
             return await v
         return v
 
     async def paginate_check_ins(
         self,
-        *args,  # tolerate accidental positional
+        *,
         event_id: Optional[str] = None,
         created_at_gte: Optional[str] = None,
         created_at_lte: Optional[str] = None,
-        per_page: int = 100,
-        **kwargs,  # tolerate stray kwargs (e.g., future flags)
+        per_page: int = 200,
+        include: str = "check_in_times,checked_in_at,checked_in_by,checked_out_by,event,event_period,event_times,locations,options,person",
     ) -> AsyncIterator[Dict[str, Any]]:
-        # If someone passed a single dict positionally (oops), merge it in
-        if args:
-            if len(args) == 1 and isinstance(args[0], dict):
-                d = args[0]
-                event_id       = d.get("event_id", event_id)
-                created_at_gte = d.get("created_at_gte", created_at_gte)
-                created_at_lte = d.get("created_at_lte", created_at_lte)
-                per_page       = d.get("per_page", per_page)
-            else:
-                # ignore unexpected positional args to avoid TypeError
-                pass
-
-        params: Dict[str, Any] = {"per_page": per_page}
+        """
+        Paginates /check_ins, following either links.next or meta.next.href.
+        First request uses query params; subsequent requests follow the absolute URL given by the API.
+        """
+        url: str = f"{API_BASE}/check_ins"
+        params: Optional[Dict[str, Any]] = {"per_page": per_page, "include": include}
         if event_id:
-            params["where[event_id]"] = event_id
+            params["filter[event_id]"] = event_id
         if created_at_gte:
             params["where[created_at][gte]"] = created_at_gte
         if created_at_lte:
             params["where[created_at][lte]"] = created_at_lte
 
-        async with httpx.AsyncClient(base_url=API_BASE, timeout=30) as http:
+        async with httpx.AsyncClient(timeout=30.0) as http:
             while True:
-                hdrs = await self._auth_header()
-                r = await http.get("/check_ins", headers=hdrs, params=params)
+                headers = await self._auth_header()
+                r = await http.get(url, headers=headers, params=params)
                 r.raise_for_status()
                 payload = r.json()
                 yield payload
-                nxt = (payload.get("meta") or {}).get("next") or {}
-                if "offset" not in nxt:
+
+                # Prefer JSON:API links.next; fallback to meta.next.href (some PCO endpoints use this)
+                next_url = (payload.get("links") or {}).get("next")
+                if not next_url:
+                    next_meta = (payload.get("meta") or {}).get("next") or {}
+                    next_url = next_meta.get("href")
+
+                if not next_url:
                     break
-                params["offset"] = nxt["offset"]
+
+                # Follow server-provided absolute URL exactly; do not send params again
+                url, params = next_url, None
 
     async def paginate_locations(
         self,
