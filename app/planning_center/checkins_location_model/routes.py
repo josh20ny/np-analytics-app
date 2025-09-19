@@ -1,207 +1,151 @@
-# ============================
 # app/planning_center/checkins_location_model/routes.py
-# ============================
 from __future__ import annotations
-from datetime import datetime, date, timedelta, timezone
-from typing import Any, Dict, Optional, List
 
-import httpx
+from datetime import date as _date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
+from typing import Optional, Tuple
+import logging
+
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.planning_center.oauth_routes import get_pco_headers
 
-from .client import PCOCheckinsClient, acquire
+from .client import PCOCheckinsClient, acquire  # acquire(pool) -> asyncpg.Connection context
 from .ingest import ingest_checkins_payload
-from .rollup import rollup_day
 from .locations import upsert_locations_from_payload
-from app.planning_center.checkins_location_model.ingest import ingest_checkins_payload as _ingest_payload
-
-import inspect, logging
-from .client import acquire, PCOCheckinsClient
+from .rollup import rollup_day  # <- our rollup function
 
 log = logging.getLogger(__name__)
+router = APIRouter(prefix="/planning-center/checkins-location", tags=["planning-center:checkins-location"])
 
+# ---- Single source of truth for includes (drop 'location_label'; not supported) ----
+CHECKINS_INCLUDE = "person,locations,event_times"
 
-router = APIRouter(prefix="/planning-center/checkins-location", tags=["Planning Center – Checkins by Location"])
+# ---- Time helpers ----
+CST = ZoneInfo("America/Chicago")
 
+def _as_date_or_last_sunday(svc_date: Optional[str]) -> _date:
+    if svc_date:
+        try:
+            return datetime.fromisoformat(svc_date).date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="svc_date must be ISO format (YYYY-MM-DD)")
+    today_cst = datetime.now(CST).date()
+    return today_cst - timedelta(days=(today_cst.weekday() + 1) % 7)
 
-# --- OAuth bearer ---
-async def _get_pco_bearer(db_sess: Session) -> str:
-    headers = await anyio.to_thread.run_sync(get_pco_headers, db_sess)
-    auth = headers.get("Authorization", "")
-    return auth.split(" ", 1)[1] if auth.lower().startswith("bearer ") else auth
+async def _get_oauth_headers_async(db_sess: Session) -> dict:
+    # get_pco_headers is sync (SQLAlchemy); run it off the event loop
+    return await anyio.to_thread.run_sync(get_pco_headers, db_sess)
 
-
-# --- Helpers ---
-def _pool_or_conn(request: Request):
+def _get_pool_or_500(request: Request):
     pool = getattr(request.app.state, "db_pool", None)
     if pool is None:
-        raise HTTPException(500, "DB pool not configured (app.state.db_pool)")
+        raise HTTPException(500, "DB pool not configured on app.state.db_pool")
     return pool
 
+def _cst_day_bounds_utc(d: _date) -> Tuple[str, str]:
+    start_cst = datetime.combine(d, time(0, 0), tzinfo=CST)
+    end_cst   = datetime.combine(d, time(23, 59, 59), tzinfo=CST)
+    s = start_cst.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    e = end_cst.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return s, e
 
-def _iso_day_bounds(d: date) -> tuple[str, str]:
-    start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
-    end = start + timedelta(days=1) - timedelta(microseconds=1)
-    return start.isoformat(), end.isoformat()
+def _cst_pm_bounds_utc(d: _date) -> Tuple[str, str]:
+    pm_start_cst = datetime.combine(d, time(15, 0), tzinfo=CST)  # 3:00 PM CST
+    pm_end_cst   = datetime.combine(d, time(18, 0), tzinfo=CST)  # 6:00 PM CST
+    s = pm_start_cst.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    e = pm_end_cst.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return s, e
 
-
-@router.post("/ingest-day")
-async def ingest_for_day(
+@router.post("/ingest-day", response_model=dict)
+async def ingest_day(
     request: Request,
-    svc_date: date = Query(..., description="Local (America/Chicago) date"),
-    per_page: int = Query(200, ge=1, le=200),
-    skip_raw: bool = Query(False),
-    db_sess: Session = Depends(get_db),
+    svc_date: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD). Defaults to last Sunday (CST)."),
+    db: Session = Depends(get_db),
 ):
-    # Build the client from your DB-backed OAuth
-    async def get_bearer():
-        return await _get_pco_bearer(db_sess)
-    client = PCOCheckinsClient(get_bearer)
+    d = _as_date_or_last_sunday(svc_date)
+    s_all, e_all = _cst_day_bounds_utc(d)
 
-    gte = f"{svc_date}T00:00:00Z"
-    lte = f"{svc_date}T23:59:59Z"
+    headers = await _get_oauth_headers_async(db)
+    client = PCOCheckinsClient(lambda: headers)
+    pool = _get_pool_or_500(request)
 
-    placed = unplaced = 0
+    total_placed = 0
+    total_unplaced = 0
 
-    # All-day pass
-    async for page in client.paginate_check_ins(
-        created_at_gte=gte,
-        created_at_lte=lte,
-        per_page=per_page,
-        include="locations,event_times,location_label,person",
-    ):
-        async with acquire(_pool_or_conn(request)) as conn:
-            p, u = await ingest_checkins_payload(conn, page, client=client, skip_raw=skip_raw)
-            placed += p; unplaced += u
+    async with acquire(pool) as conn:
+        # Single all-day pass
+        async for payload in client.paginate_check_ins(
+            created_at_gte=s_all,
+            created_at_lte=e_all,
+            include=CHECKINS_INCLUDE,
+            per_page=200,
+        ):
+            placed, unplaced = await ingest_checkins_payload(conn, payload, client=client)
+            total_placed += placed
+            total_unplaced += unplaced
 
-    # PM safety net (InsideOut / 4:30 PM)
-    pm_gte = f"{svc_date}T20:00:00Z"   # ~3:00 PM CT
-    pm_lte = f"{svc_date}T23:59:59Z"
-    async for page in client.paginate_check_ins(
-        created_at_gte=pm_gte,
-        created_at_lte=pm_lte,
-        per_page=per_page,
-        include="locations,event_times,location_label,person",
-    ):
-        async with acquire(_pool_or_conn(request)) as conn:
-            p, u = await ingest_checkins_payload(conn, page, client=client, skip_raw=skip_raw)
-            placed += p; unplaced += u
+        # Return the *actual* distinct count for that day
+        rec = await conn.fetchrow(
+            """
+            SELECT COUNT(*) AS c
+            FROM pco_checkins_raw
+            WHERE (created_at_pco AT TIME ZONE 'America/Chicago')::date = $1::date
+            """,
+            d,
+        )
+        day_total = int(rec["c"])
 
-    return {"placed": placed, "unplaced": unplaced}
-
-
-@router.post("/ingest-range")
-async def ingest_range(
-    request: Request,
-    start: date,
-    end: date,
-    per_page: int = 200,
-    db_sess: Session = Depends(get_db),
-) -> Dict[str, Any]:
-    cur = start
-    results = []
-    while cur <= end:
-        res = await ingest_for_day(request, svc_date=cur, per_page=per_page, skip_raw=False, db_sess=db_sess)
-        results.append(res)
-        cur = cur + timedelta(days=1)
-    return {"ok": True, "days": results}
-
-
-@router.post("/sync-locations")
-async def sync_locations(
-    request: Request,
-    event_id: Optional[str] = None,
-    per_page: int = 200,
-    db_sess: Session = Depends(get_db),
-) -> Dict[str, Any]:
-    db = _pool_or_conn(request)
-
-    async def get_bearer():
-        return await _get_pco_bearer(db_sess)
-
-    client = PCOCheckinsClient(get_bearer)
-    processed = 0
-    async for page in client.paginate_locations(event_id=event_id, per_page=per_page):
-        async with acquire(db) as conn:
-            await upsert_locations_from_payload(conn, page)
-            processed += len(page.get("included") or [])
-    return {"ok": True, "included_processed": processed}
-
-@router.post("/rollup-day")
-async def rollup_day_endpoint(
-    request: Request,
-    svc_date: date = Query(..., description="Local (America/Chicago) date to roll up"),
-):
-    db = _pool_or_conn(request)  # <-- asyncpg
-    async with acquire(db) as conn:
-        rows = await rollup_day(conn, svc_date)
-    return {"date": str(svc_date), "rows_inserted": rows}
-
-
-
-@router.get("/health")
-async def health(request: Request) -> Dict[str, Any]:
-    db = _pool_or_conn(request)
-    try:
-        async with acquire(db) as conn:
-            await conn.fetchval("SELECT 1")
-        return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "detail": str(e)}
-    
-
-import inspect
-from . import ingest as ingest_mod
-
-@router.get("/debug-whoami")
-async def debug_whoami() -> Dict[str, str]:
     return {
-        "routes_file": __file__,
-        "ingest_file": inspect.getsourcefile(ingest_mod) or "unknown",
-        "ingest_version": getattr(ingest_mod, "INGEST_VERSION", "unset"),
+        "ok": True,
+        "date": str(d),
+        "raw_rows_total_for_date": day_total,
+        "unplaced_logged": total_unplaced,
+        "include": CHECKINS_INCLUDE,
     }
 
 
-@router.post("/ingest-day-dryrun")
-async def ingest_day_dryrun(
+@router.post("/sync-locations", response_model=dict)
+async def sync_locations(
     request: Request,
-    svc_date: Optional[date] = None,
-    per_page: int = 50,
-    sample: int = 12,
-    db_sess: Session = Depends(get_db),
-) -> Dict[str, Any]:
-    if svc_date is None:
-        svc_date = date.today()
-    gte, lte = _iso_day_bounds(svc_date)
+    svc_date: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD). Defaults to last Sunday (CST)."),
+    event_id: Optional[str] = Query(None, description="Optional PCO Event ID to filter locations"),
+    db: Session = Depends(get_db),
+):
+    """
+    Sync the PCO locations tree and refresh the closure table (pco_location_paths).
+    Uses paginate_locations + upsert per page.
+    """
+    _ = _as_date_or_last_sunday(svc_date)  # date not needed here; keep signature consistent
 
-    client = PCOCheckinsClient(lambda: get_pco_headers(db_sess))
-    findings: List[Dict[str, Any]] = []
-    async for page in client.paginate_check_ins(created_at_gte=gte, created_at_lte=lte, per_page=per_page):
-        included = page.get("included") or []
-        idx = {((obj.get("type") or ""), (obj.get("id") or "")): obj for obj in included}
-        for row in page.get("data") or []:
-            if (row.get("type") or "").lower() != "checkin":
-                continue
-            a = row.get("attributes") or {}
-            r = row.get("relationships") or {}
-            checkin_id = row.get("id")
-            evt_time_id = ((r.get("event_time") or {}).get("data") or {}).get("id")
-            evt_time = idx.get(("EventTime", evt_time_id)) if evt_time_id else None
+    headers = await _get_oauth_headers_async(db)
+    client = PCOCheckinsClient(lambda: headers)
 
-            from .derive import _ts, derive_service_bucket
-            ts = _ts(a.get("created_at") or a.get("updated_at"))
-            svc = derive_service_bucket(evt_time, ts) if ts else None
+    pool = _get_pool_or_500(request)
+    processed_included = 0
 
-            findings.append({
-                "checkin_id": checkin_id,
-                "service_bucket_type": None if svc is None else type(svc).__name__,
-                "service_bucket_preview": None if svc is None else (str(svc)[:80] + ("..." if len(str(svc)) > 80 else "")),
-                "has_evt_time": bool(evt_time),
-            })
-            if len(findings) >= sample:
-                return {"ok": True, "date": str(svc_date), "sample": findings}
-    return {"ok": True, "date": str(svc_date), "sample": findings}
+    async for page in client.paginate_locations(event_id=event_id, per_page=200, include="parent,event"):
+        async with acquire(pool) as conn:
+            await upsert_locations_from_payload(conn, page)
+        processed_included += len(page.get("included") or [])
+
+    return {"ok": True, "included_processed": processed_included}
+
+@router.post("/rollup-day", response_model=dict)
+async def rollup_day_endpoint(
+    request: Request,
+    svc_date: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD). Defaults to last Sunday (CST)."),
+):
+    """
+    Compute set-based rollups for the given date into attendance_by_location_daily.
+    """
+    d = _as_date_or_last_sunday(svc_date)
+    pool = _get_pool_or_500(request)
+
+    async with acquire(pool) as conn:
+        rows = await rollup_day(conn, d)
+
+    return {"ok": True, "date": str(d), "rows_inserted": rows}
