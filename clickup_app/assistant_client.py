@@ -9,6 +9,7 @@ from clickup_app.assistant_tools import (
     fetch_records_for_range,
     aggregate_total_attendance,
     compare_adult_attendance,
+    get_checkins_attendance,
 )
 from app.utils.common import now_cst, get_last_sunday_cst, get_previous_week_dates_cst 
 
@@ -28,6 +29,41 @@ FUNCTIONS = [
                 "month": {"type": "integer", "minimum": 1, "maximum": 12, "description": "Month number (1-12)"},
             },
             "required": ["year1", "year2", "month"],
+        },
+    },
+    {
+        "name": "getCheckinsAttendance",
+        "description": "Get attendance by ministry/service/location for a Sunday (nested or flat rows), with optional person-level facts.",
+        "strict": False,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Required ISO date (YYYY-MM-DD) for the Sunday to fetch."
+                },
+                "view": {
+                    "type": "string",
+                    "enum": ["nested", "rows"],
+                    "description": "Return shape: 'nested' for ministries→services→locations or 'rows' for a flat list."
+                },
+                "ministry": {
+                    "type": "string",
+                    "enum": ["Waumba Land", "UpStreet", "Transit", "InsideOut"],
+                    "description": "Optional ministry filter."
+                },
+                "service": {
+                    "type": "string",
+                    "enum": ["9:30 AM", "11:00 AM", "4:30 PM"],
+                    "description": "Optional service filter (used with either view)."
+                },
+                "include_persons": {
+                    "type": "boolean",
+                    "description": "Only for 'nested' view: include person-level facts (from f_checkins_person)."
+                }
+            },
+            "required": ["date"]
         },
     },
 ]
@@ -137,7 +173,19 @@ def call_tool_function(function_name: str, args: dict) -> str:
         else:
             return f"Missing date or range parameters for {function_name}: {args}"
         return json.dumps(rows, default=str)
+    
+    # wherever you switch on tool_name today
+    elif function_name == "getCheckinsAttendance":
+        result = get_checkins_attendance(
+            date_value=args["date"],
+            view=args.get("view", "nested"),
+            ministry=args.get("ministry"),
+            service=args.get("service"),
+            include_persons=args.get("include_persons", False),
+        )
+        return json.dumps(result, default=str)
 
-    return f"Unknown tool: {function_name}"
+
+    return json.dumps({"error": f"Unknown tool: {function_name}", "args": args})
 
 

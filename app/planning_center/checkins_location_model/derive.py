@@ -9,7 +9,7 @@ import pytz
 
 # Map location roots to ministry keys used across the app
 MINISTRY_KEYWORDS = {
-    "waumba": "WaumbaLand",
+    "waumba": "Waumba Land",
     "upstreet": "UpStreet",
     "transit": "Transit",
     "insideout": "InsideOut",
@@ -32,12 +32,12 @@ def _bucket_from_dt(dt_utc: datetime) -> str:
 CENTRAL_TZ = pytz.timezone("America/Chicago")
 
 # Prefer leaf-closest match; if multiple, apply a deterministic priority.
-PREFERRED_ORDER = ["InsideOut", "Transit", "UpStreet", "WaumbaLand"]
+PREFERRED_ORDER = ["InsideOut", "Transit", "UpStreet", "Waumba Land"]
 MINISTRY_PATTERNS = {
     "InsideOut":  ["insideout", "inside out", "inside-out", "io"],
     "Transit":    ["transit"],
     "UpStreet":   ["upstreet", "up street", "up-street"],
-    "WaumbaLand": ["waumba land", "waumbaland", "waumba"],
+    "Waumba Land": ["waumba land", "waumbaland", "waumba"],
 }
 
 def derive_ministry_from_chain(names: List[str]) -> Optional[str]:

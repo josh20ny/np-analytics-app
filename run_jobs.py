@@ -117,6 +117,60 @@ def call_job(endpoint: str, label: str, timeout_s: int | None = None) -> str:
     log.error("❌ %s exhausted retries", label)
     return ""
 
+def post_job(endpoint: str, label: str, timeout_s: int | None = None) -> str:
+    url = f"{BASE_URL.rstrip('/')}{endpoint}"
+    to = timeout_s or TIMEOUTS.get(label, 600)
+    timeout = (10, to)
+
+    max_tries = 5
+    for attempt in range(1, max_tries + 1):
+        t0 = time.perf_counter()
+        log.info("📡 POSTing: %s – %s (timeout=%ss try=%d/%d)", endpoint, label, to, attempt, max_tries)
+        try:
+            r = requests.post(url, timeout=timeout)
+            elapsed = time.perf_counter() - t0
+            if r.status_code == 200:
+                log.info("✅ %s finished (%s) in %.1fs", label, r.status_code, elapsed)
+                return r.text or ""
+            if r.status_code in (502, 503, 504):
+                log.warning("↩️ %s got %s in %.1fs, will retry", label, r.status_code, elapsed)
+                time.sleep(0.5 * (2 ** (attempt-1)))
+                continue
+            log.error("❌ %s failed (%s) in %.1fs: %s", label, r.status_code, elapsed, (r.text or "")[:300])
+            return ""
+        except (requests.ConnectionError, requests.ReadTimeout) as e:
+            elapsed = time.perf_counter() - t0
+            log.warning("↩️ %s connection error (%s) in %.1fs, will retry", label, e.__class__.__name__, elapsed)
+            time.sleep(0.5 * (2 ** (attempt-1)))
+        except Exception:
+            elapsed = time.perf_counter() - t0
+            log.exception("💥 %s unexpected error after %.1fs", label, elapsed)
+            return ""
+    log.error("❌ %s exhausted retries", label)
+    return ""
+
+def fetch_unplaced_for_date(target_sunday: str) -> list[dict]:
+    """
+    Return unplaced/invalid check-ins for the given CST date from pco_checkins_unplaced.
+    """
+    rows = []
+    with SessionLocal() as db:
+        sql = text("""
+            SELECT
+              checkin_id,
+              person_id,
+              (created_at_pco AT TIME ZONE 'America/Chicago') AS created_at_cst,
+              reason_codes,
+              details
+            FROM pco_checkins_unplaced
+            WHERE (created_at_pco AT TIME ZONE 'America/Chicago')::date = :d::date
+            ORDER BY created_at_pco
+        """)
+        for r in db.execute(sql, {"d": target_sunday}).mappings().all():
+            rows.append(dict(r))
+    return rows
+
+
 def _json_or_empty(raw: str) -> dict:
     try:
         return json.loads(raw or "{}")
@@ -165,14 +219,23 @@ def run_weekly_pipeline() -> dict:
         (f"/planning-center/people/sync?since={last_mon}", "People sync"),
         (f"/planning-center/groups/sync?since={last_mon}", "Groups/memberships sync"),
         (f"/planning-center/serving/sync?since={last_mon}", "Serving teams/memberships sync"),
-        (f"/planning-center/checkins?date={last_sun}", "Check-ins ingest (last Sunday)"),
+        #(f"/planning-center/checkins?date={last_sun}", "Check-ins ingest (last Sunday)"),
+        (f"/planning-center/checkins-location/sync-locations",                                                "PCO locations sync POST"),
+        (f"/planning-center/checkins-location/ingest-day?svc_date={last_sun}&write_person_facts=true", "Check-ins ingest (last Sunday) POST"),
+        (f"/planning-center/checkins-location/rollup-day?svc_date={last_sun}&write_legacy=true",             "Check-ins rollup (last Sunday) POST"),
         (f"/planning-center/giving/weekly-summary?week_end={last_sun}", "Giving summary (last full week)"),
         (f"/analytics/cadence/rebuild?signals=attend,give,group,serve&since={last_mon}&rolling_days=180&week_end={last_sun}","Cadence rebuild"),
         (f"/analytics/cadence/snap-week?week_end={last_sun}", "Cadence snapshot"),
     ]
 
     for endpoint, label in calls:
-        call_job(endpoint, label, TIMEOUTS.get(label))
+        for endpoint, label in calls:
+            # the three new check-ins steps are POST; others remain GET
+            if "POST" in label:
+                post_job(endpoint, label, TIMEOUTS.get(label))
+            else:
+                call_job(endpoint, label, TIMEOUTS.get(label))
+            time.sleep(1.5)
         # brief pacing to keep server comfy
         time.sleep(1.5)
 
@@ -273,7 +336,8 @@ def main():
     last_mon, last_sun = last_monday_and_sunday_cst()
     collection_jobs = [
         ("/attendance/process-sheet", "Adult attendance processing"),
-        (f"/planning-center/checkins?date={last_sun}", "Planning Center check-ins"),
+        #(f"/planning-center/checkins?date={last_sun}", "Planning Center check-ins"),
+        (f"/planning-center/checkins-location/rollup-day?svc_date={last_sun}", "Planning Center check-ins"),
         (f"/planning-center/giving/weekly-summary?week_end={last_sun}", "Planning Center Giving Summary"),
         ("/planning-center/groups", "Planning Center Groups"),
         ("/planning-center/serving/summary", "Planning Center Volunteer Summary"),
@@ -284,9 +348,26 @@ def main():
 
     outputs: dict[str, object] = {}
     for endpoint, label in collection_jobs:
-        raw = call_job(endpoint, label, 600)
+        if label == "Planning Center check-ins":
+            raw = post_job(endpoint, label, 600)
+        else:
+            raw = call_job(endpoint, label, 600)
         outputs[label] = _json_or_empty(raw)
         time.sleep(0.5)
+
+    # Enrich with unplaced/skipped for DM section
+    try:
+        last_sun_str = str(cadence.get("week_end"))
+        skipped = fetch_unplaced_for_date(last_sun_str)
+        if skipped:
+            chk = outputs.get("Planning Center check-ins") or {}
+            dbg = chk.get("debug") or {}
+            dbg["skipped"] = skipped
+            chk["debug"] = dbg
+            outputs["Planning Center check-ins"] = chk
+            log.info("🧾 Attached %d unplaced check-ins for DM", len(skipped))
+    except Exception:
+        log.exception("Could not attach unplaced check-ins")
 
     # 3) TEAM summary via Assistant (strict order)
     team_prompt = build_team_prompt(outputs, cadence)

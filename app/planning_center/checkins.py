@@ -35,30 +35,18 @@ SERVICE_KEY_MAP = {
 MINISTRY_COLUMNS = {
     "Waumba Land": [
         "attendance_930", "attendance_1100", "total_attendance",
-        "new_kids_930",   "new_kids_1100",   "total_new_kids",  "notes",
-        "age_0_2_male",    "age_0_2_female",
-        "age_3_5_male",    "age_3_5_female",
+        "new_kids_930",   "new_kids_1100",   "total_new_kids", "notes",
     ],
     "UpStreet": [
         "attendance_930", "attendance_1100", "total_attendance",
-        "new_kids_930",   "new_kids_1100",   "total_new_kids",  "notes",
-        "grade_k_1_male", "grade_k_1_female",
-        "grade_2_3_male", "grade_2_3_female",
-        "grade_4_5_male", "grade_4_5_female",
+        "new_kids_930",   "new_kids_1100",   "total_new_kids", "notes",
     ],
     "Transit": [
         "attendance_930", "attendance_1100", "total_attendance",
-        "new_kids_930",   "new_kids_1100",   "total_new_kids",  "notes",
-        "grade_6_male",   "grade_6_female",
-        "grade_7_male",   "grade_7_female",
-        "grade_8_male",   "grade_8_female",
+        "new_kids_930",   "new_kids_1100",   "total_new_kids", "notes",
     ],
     "InsideOut": [
         "total_attendance", "new_students", "notes",
-        "grade_9_male", "grade_9_female",
-        "grade_10_male", "grade_10_female",
-        "grade_11_male", "grade_11_female",
-        "grade_12_male", "grade_12_female",
     ],
 }
 

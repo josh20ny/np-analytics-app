@@ -177,3 +177,16 @@ from requests.auth import HTTPBasicAuth
 def mailchimp_auth(user: str, api_key: str) -> HTTPBasicAuth:
     # Per Mailchimp, username can be any non-empty string; often "anystring" or "user"
     return HTTPBasicAuth(user, api_key)
+
+# --- Service bucket normalization -----------------------------------------
+
+MINISTRY_SERVICE_BUCKETS = {
+    "Waumba Land": ["9:30 AM", "11:00 AM"],
+    "UpStreet":   ["9:30 AM", "11:00 AM"],
+    "Transit":    ["9:30 AM", "11:00 AM"],
+    "InsideOut":  ["4:30 PM"],
+}
+
+def is_allowed_bucket(ministry: str, bucket: str) -> bool:
+    return bucket in (MINISTRY_SERVICE_BUCKETS.get(ministry) or [])
+
