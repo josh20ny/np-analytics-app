@@ -8,8 +8,9 @@ from datetime import datetime
 import logging
 import json
 import asyncpg
+import re
 
-from .derive import _ts, derive_service_bucket, derive_ministry_key
+from .derive import _ts, derive_service_bucket, derive_ministry_key, service_from_location_chain
 from .locations import upsert_locations_from_payload  # keeps pco_locations fresh from each page
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,45 @@ ON CONFLICT (checkin_id) DO UPDATE SET
   reason_codes = EXCLUDED.reason_codes,
   details = EXCLUDED.details
 """
+
+MINISTRY_PATTERNS = {
+    # Waumba Land: match the ministry name OR the animal room names you use
+    "Waumba Land": re.compile(
+        r"\b(?:waumba(?:\s*land)?|monkeys?|hippos?|gazelles?|zebras?|gators?|elephants?)\b",
+        re.IGNORECASE,
+    ),
+    # UpStreet (elementary)
+    "UpStreet": re.compile(
+        r"\b(?:up\s*street|upstreet|kinder(?:garten)?|elementary|1st|2nd|3rd|4th|5th|grade)\b",
+        re.IGNORECASE,
+    ),
+    # Transit (middle school)
+    "Transit": re.compile(
+        r"\b(?:transit|6th|7th|8th|middle)\b",
+        re.IGNORECASE,
+    ),
+    # InsideOut (high school)
+    "InsideOut": re.compile(
+        r"\b(?:inside\s*out|insideout|9th|10th|11th|12th|freshman|sophomore|junior|senior|hs|high\s*school)\b",
+        re.IGNORECASE,
+    ),
+}
+
+def _derive_ministry_from_text(text: str | None) -> str | None:
+    if not text:
+        return None
+    for ministry, pat in MINISTRY_PATTERNS.items():
+        if pat.search(text):
+            return ministry
+    return None
+
+def _derive_ministry_from_chain(name_chain: list[str]) -> str | None:
+    # Try each piece first, then the whole string
+    for n in name_chain:
+        m = _derive_ministry_from_text(n)
+        if m:
+            return m
+    return _derive_ministry_from_text(" ".join([n for n in name_chain if n]))
 
 
 def _build_included_index(payload: Dict[str, Any]) -> Dict[tuple, dict]:
@@ -124,7 +164,22 @@ async def ingest_checkins_payload(
             evt_time_obj = idx.get(("EventTime", evt_time_id)) or {}
             evt_time_attrs = (evt_time_obj.get("attributes") or {})
             starts_at = _ts(evt_time_attrs.get("starts_at")) or created_at_pco
+            
+            # Location include (leaf)
+            loc_obj = idx.get(("Location", loc_id)) or {}
+            loc_name = ((loc_obj.get("attributes") or {}).get("name") or "").strip()
+
+            # Service bucket (with fallback from location name)
             service_bucket = derive_service_bucket(evt_time_obj, created_at_pco)
+            if not service_bucket:
+                inferred = service_from_location_chain([loc_name])  # e.g., "9:30 Service", etc.
+                if inferred:
+                    service_bucket = inferred
+
+            # Ministry (use your updated regex patterns + chain helper)
+            # We only have the leaf name here, but that’s enough for WL animals / grades / HS labels
+            name_chain = [loc_name]  # extend later with ancestor names if you include them
+            ministry_key = _derive_ministry_from_chain(name_chain) or None
 
             # event_id via EventTime.relationships.event if present
             event_id = None
@@ -143,14 +198,6 @@ async def ingest_checkins_payload(
             person_attrs = (person_obj.get("attributes") or {})
             if person_attrs:
                 person_created_at = _ts(person_attrs.get("created_at"))
-
-            # Resolve a friendly location name (best-effort)
-            loc_name = None
-            loc_obj = idx.get(("Location", loc_id)) or {}
-            loc_name = (loc_obj.get("attributes") or {}).get("name")
-
-            # Derive ministry_key from location name (nullable OK)
-            ministry_key = derive_ministry_key(loc_name or "") or None
 
             if not skip_raw:
                 await conn.execute(
