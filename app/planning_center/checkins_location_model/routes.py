@@ -293,6 +293,7 @@ async def rollup_day_endpoint(
     svc_date: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD). Defaults to last Sunday (CST)."),
     write_legacy: bool = Query(True, description="Also write slim legacy totals (bridge)"),
     dedupe_scope: Literal["service","day"] = "service", #Optional Deduping checkins byt SERVICE (true capacity) or DAY (true uniqie people)
+    log_duplicates: bool = True,
 ):
     d = _as_date_or_last_sunday(svc_date)
     pool = _get_pool_or_500(request)
@@ -301,7 +302,7 @@ async def rollup_day_endpoint(
         # Keep these operations on the same connection (and transaction)
         async with conn.transaction():
             # 1) roll up into attendance_by_location_daily
-            rows_inserted = await rollup_day(conn, d, dedupe_scope)
+            rows_inserted = await rollup_day(conn, d, dedupe_scope, log_duplicates)
 
             # 2) optional legacy bridge writes (same connection!)
             if write_legacy:

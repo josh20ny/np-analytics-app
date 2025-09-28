@@ -5,6 +5,7 @@ load_dotenv()
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy import text
 
 # Project imports
 from data import load_table, engine
@@ -181,6 +182,96 @@ for tab_obj, tab_name in zip(tabs, tab_names):
                         st.dataframe(avg_row, use_container_width=True)
             except Exception as e:
                 st.warning(f"Mailchimp audience view error: {e}")
+
+            # Audience filter
+            aud_map = {
+                "625faaf650": "Northpoint Church",
+                "5839e884af": "Inside Out Parents 2025-2026",
+                "4d8c7861bc": "Transit Parents 2025-2026",
+                "621229dee8": "Upstreet Parents 2025-2026",
+                "5bfb241f04": "Waumba Land Parents 2025-2026",
+            }
+            aud_choices = ["All"] + list(aud_map.values())
+            aud_pick = st.selectbox("Audience", aud_choices, index=0, key="mc_recent_audience")
+
+            days = st.slider("Window (days)", min_value=30, max_value=365, value=90, step=15, key="mc_recent_days")
+
+            where_extra = ""
+            param = {}
+            if aud_pick != "All":
+                # invert map
+                inv = {v: k for k, v in aud_map.items()}
+                where_extra = "AND c.list_id = :lid"
+                param["lid"] = inv.get(aud_pick)
+
+            param["days"] = days
+
+            sql_recent = text("""
+                SELECT
+                c.id,
+                c.send_time,
+                c.list_id,
+                c.subject,
+                c.emails_sent,
+                ROUND((100 * COALESCE(c.open_rate_effective, 0))::numeric, 2)  AS open_rate_pct,
+                ROUND((100 * COALESCE(c.click_rate_effective, 0))::numeric, 2) AS click_rate_pct,
+                t.top_link_url,
+                t.top_link_unique,
+                t.top_link_total
+                FROM v_mailchimp_campaigns_enriched c
+                LEFT JOIN v_mailchimp_campaign_top_link t ON t.campaign_id = c.id
+                WHERE c.send_time >= NOW() - (:days || ' days')::interval
+                {where_extra}
+                ORDER BY c.send_time DESC
+                LIMIT 500
+            """.replace("{where_extra}", where_extra))
+
+            with engine.connect() as c:
+                df_recent = pd.read_sql(sql_recent, c, params=param, parse_dates=["send_time"])
+
+            if df_recent.empty:
+                st.info("No campaigns in the selected window.")
+            else:
+                df_recent["audience"] = df_recent["list_id"].map(aud_map).fillna(df_recent["list_id"])
+                df_recent_display = df_recent[[
+                    "send_time","audience","subject","emails_sent","open_rate_pct","click_rate_pct",
+                    "top_link_url","top_link_unique","top_link_total"
+                ]].rename(columns={
+                    "send_time":"Sent",
+                    "audience":"Audience",
+                    "subject":"Subject",
+                    "emails_sent":"Sent To",
+                    "open_rate_pct":"Open %",
+                    "click_rate_pct":"Click %",
+                    "top_link_url":"Top Link",
+                    "top_link_unique":"Top Link Unique",
+                    "top_link_total":"Top Link Total"
+                })
+                df_recent_display["Sent"] = df_recent_display["Sent"].dt.tz_localize(None)
+                st.dataframe(df_recent_display, use_container_width=True, hide_index=True)
+
+            # --- Top Clicks for a Campaign ------------------------------------------------
+            st.markdown("### Top Clicks for a Campaign")
+            if not df_recent.empty:
+                camp_ids = df_recent[["id","subject","send_time"]].copy()
+                camp_ids["label"] = camp_ids.apply(lambda r: f"{r['send_time'].strftime('%Y-%m-%d %H:%M')} — {r['subject']}", axis=1)
+                pick = st.selectbox("Choose campaign", camp_ids["label"].tolist(), key="mc_pick_campaign")
+                picked_id = camp_ids.loc[camp_ids["label"] == pick, "id"].iloc[0]
+
+                sql_clicks = text("""
+                    SELECT label, url, unique_clicks, total_clicks
+                    FROM v_mailchimp_campaign_top_clicks
+                    WHERE campaign_id = :cid
+                    ORDER BY rn
+                    LIMIT 20
+                """)
+                with engine.connect() as c:
+                    df_clicks = pd.read_sql(sql_clicks, c, params={"cid": picked_id})
+
+                if df_clicks.empty:
+                    st.info("No click data for this campaign.")
+                else:
+                    st.dataframe(df_clicks, use_container_width=True, hide_index=True)
             
             # Skip the generic ranged_table for this tab
             continue

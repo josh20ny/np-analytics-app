@@ -1,7 +1,7 @@
 # run_jobs.py
-import os, time, json, logging, requests
+import os, time, json, logging, requests, argparse
 from zoneinfo import ZoneInfo
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from sqlalchemy import text
 import math
 
@@ -14,7 +14,6 @@ load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BASE_URL                 = os.getenv("API_BASE_URL")
-WAKEUP_DELAY             = int(os.getenv("WAKEUP_DELAY", "10"))
 CLICKUP_WORKSPACE_ID     = os.getenv("CLICKUP_WORKSPACE_ID", "")
 CLICKUP_TEAM_CHANNEL_ID  = os.getenv("CLICKUP_TEAM_CHANNEL_ID", "")
 
@@ -36,6 +35,7 @@ JOBS = [
     ("/youtube/weekly-summary",                 "YouTube weekly summary"),
     ("/youtube/livestreams",                    "YouTube livestream tracking"),
     ("/mailchimp/weekly-summary",               "Mailchimp weekly summary"),
+    (f"/mailchimp/weekly-refresh",              "Mailchimp weekly refresh POST"),
 ]
 
 # Endpoint-specific read timeouts (seconds)
@@ -48,16 +48,45 @@ TIMEOUTS = {
     "Cadence rebuild": 2400,
     "Cadence snapshot": 1800,
     "Cadence weekly report": 1800,
+    "Mailchimp weekly refresh": 900,
 }
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-def last_monday_and_sunday_cst() -> tuple[datetime.date, datetime.date]:
-    """Return the last full Mon–Sun window in America/Chicago."""
+def week_bounds_for(week_end: date) -> tuple[date, date]:
+    """Given a Sunday (CST), return its Mon–Sun window."""
+    week_start = week_end - timedelta(days=6)
+    return week_start, week_end
+
+def last_monday_and_sunday_cst(override_week_end: date | None = None) -> tuple[date, date]:
+    """Return the last full Mon–Sun window in America/Chicago, or the window for override_week_end."""
+    if override_week_end:
+        return week_bounds_for(override_week_end)
     now_cst = datetime.now(CENTRAL_TZ).date()
-    # Monday=0..Sunday=6; last Sunday is yesterday if today is Monday
     last_sun = now_cst - timedelta(days=(now_cst.weekday() + 1))
     last_mon = last_sun - timedelta(days=6)
     return last_mon, last_sun
+
+def resolve_week_window(week_end_str: str | None) -> tuple[date, date]:
+    """
+    If week_end_str (YYYY-MM-DD) is provided, use that Sunday as week_end.
+    If it is not a Sunday, snap to the previous Sunday and log a warning.
+    Otherwise, return the last full Mon–Sun window (default behavior).
+    """
+    if not week_end_str:
+        return last_monday_and_sunday_cst()
+
+    try:
+        week_end = datetime.strptime(week_end_str, "%Y-%m-%d").date()
+    except ValueError:
+        raise SystemExit(f"Invalid --week-end date: {week_end_str!r}. Use YYYY-MM-DD.")
+
+    if week_end.weekday() != 6:  # Sunday == 6
+        snap = week_end - timedelta(days=(week_end.weekday() + 1))
+        log.warning("Provided week_end %s is not a Sunday; using previous Sunday %s.", week_end, snap)
+        week_end = snap
+
+    week_start = week_end - timedelta(days=6)
+    return week_start, week_end
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 log = logging.getLogger("run_jobs")
@@ -163,7 +192,7 @@ def fetch_unplaced_for_date(target_sunday: str) -> list[dict]:
               reason_codes,
               details
             FROM pco_checkins_unplaced
-            WHERE (created_at_pco AT TIME ZONE 'America/Chicago')::date = :d::date
+            WHERE (created_at_pco AT TIME ZONE 'America/Chicago')::date = (:d:):date
             ORDER BY created_at_pco
         """)
         for r in db.execute(sql, {"d": target_sunday}).mappings().all():
@@ -178,14 +207,19 @@ def _json_or_empty(raw: str) -> dict:
         return {"error": "invalid JSON", "raw": (raw or "")[:3000]}
 
 # ── Cadence readiness polling (ensures DM has people lists) ───────────────────
-def fetch_cadence_report(target_sunday: str, tries: int = 8, wait_s: int = 10) -> dict:
+def fetch_cadence_report(
+    target_sunday: str,
+    ensure_snapshot_first_attempt: bool = False,  # NEW
+    tries: int = 8,
+    wait_s: int = 10
+) -> dict:
     """
     Poll for the cadence weekly-report once the JSON includes the expected keys.
     Note: an empty 'lapses' list is valid and should be considered ready.
     """
     last_raw = ""
     for attempt in range(1, tries + 1):
-        ensure = "true" if attempt == 1 else "false"          # build snapshot once
+        ensure = "true" if (attempt == 1 and ensure_snapshot_first_attempt) else "false"  # CHANGED
         persist = "true" if attempt == 1 else "false"
         endpoint = (
             f"/analytics/cadence/weekly-report?"
@@ -209,38 +243,34 @@ def fetch_cadence_report(target_sunday: str, tries: int = 8, wait_s: int = 10) -
     return _json_or_empty(last_raw)
 
 
+
 # ── Pipeline: facts first → cadence last (blocking) ───────────────────────────
-def run_weekly_pipeline() -> dict:
+def run_weekly_pipeline(selected_week_end: date | None = None) -> dict:
     """Sequential weekly pipeline with strict 1-week window (Mon–Sun, CST)."""
-    last_mon, last_sun = last_monday_and_sunday_cst()
+    last_mon, last_sun = last_monday_and_sunday_cst(selected_week_end)
+
     log.info("🗓️ Weekly window: %s → %s (CST)", last_mon, last_sun)
 
     calls = [
         (f"/planning-center/people/sync?since={last_mon}", "People sync"),
         (f"/planning-center/groups/sync?since={last_mon}", "Groups/memberships sync"),
         (f"/planning-center/serving/sync?since={last_mon}", "Serving teams/memberships sync"),
-        #(f"/planning-center/checkins?date={last_sun}", "Check-ins ingest (last Sunday)"),
         (f"/planning-center/checkins-location/sync-locations",                                                "PCO locations sync POST"),
-        (f"/planning-center/checkins-location/ingest-day?svc_date={last_sun}&write_person_facts=true", "Check-ins ingest (last Sunday) POST"),
-        (f"/planning-center/checkins-location/rollup-day?svc_date={last_sun}&write_legacy=true",             "Check-ins rollup (last Sunday) POST"),
-        (f"/planning-center/giving/weekly-summary?week_end={last_sun}", "Giving summary (last full week)"),
-        (f"/analytics/cadence/rebuild?signals=attend,give,group,serve&since={last_mon}&rolling_days=180&week_end={last_sun}","Cadence rebuild"),
+        (f"/planning-center/checkins-location/ingest-day?svc_date={last_sun}&write_person_facts=true",       "Check-ins ingest (last Sunday) POST"),
+        (f"/planning-center/checkins-location/rollup-day?svc_date={last_sun}&write_legacy=true", "Check-ins rollup (last Sunday) POST"),
+        (f"/planning-center/giving/weekly-summary?start={last_mon}&end={last_sun}", "Giving summary (last full week)"),
         (f"/analytics/cadence/snap-week?week_end={last_sun}", "Cadence snapshot"),
     ]
 
     for endpoint, label in calls:
-        for endpoint, label in calls:
-            # the three new check-ins steps are POST; others remain GET
-            if "POST" in label:
-                post_job(endpoint, label, TIMEOUTS.get(label))
-            else:
-                call_job(endpoint, label, TIMEOUTS.get(label))
-            time.sleep(1.5)
-        # brief pacing to keep server comfy
+        if "POST" in label:
+            post_job(endpoint, label, TIMEOUTS.get(label))
+        else:
+            call_job(endpoint, label, TIMEOUTS.get(label))
         time.sleep(1.5)
 
-    # Ensure we have a fully-populated weekly-report JSON before summaries/DMs
-    cadence = fetch_cadence_report(last_sun)
+    # We already snapped and persisted; just read the weekly report.
+    cadence = fetch_cadence_report(str(last_sun))
     return cadence
 
 # ── Team prompt (strict order) ────────────────────────────────────────────────
@@ -316,12 +346,26 @@ def build_dm_messages(outputs: dict, cadence: dict) -> list[str]:
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
+    parser = argparse.ArgumentParser(description="Run weekly NP Analytics jobs")
+    parser.add_argument("--week-end", dest="week_end", help="Sunday YYYY-MM-DD to run FOR (Mon–Sun window)")
+    args = parser.parse_args()
+
+    selected_week_end_date: date | None = None
+    if args.week_end:
+        try:
+            selected_week_end_date = date.fromisoformat(args.week_end)
+            if selected_week_end_date.weekday() != 6:  # Monday=0..Sunday=6
+                log.warning("⚠️ --week-end %s is not a Sunday; proceeding anyway.", selected_week_end_date)
+        except ValueError:
+            log.error("❌ --week-end must be YYYY-MM-DD (e.g., 2025-09-21)")
+            return
+
     # Warm the app
     ok = warmup_base_url()
     if not ok:
-        # optionally bail early or continue; continuing is fine since call_job retries
         log.warning("Proceeding despite warm-up failure…")
 
+    # DB ping
     try:
         with SessionLocal() as db:
             db.execute(text("SELECT 1"))
@@ -329,16 +373,17 @@ def main():
     except Exception as e:
         log.error("❌ DB test query failed: %s", e)
 
-    # 1) Run the pipeline (sequential, strict week window) → cadence dict
-    cadence = run_weekly_pipeline()
+    # Resolve the target window once and reuse
+    last_mon, last_sun = last_monday_and_sunday_cst(selected_week_end_date)
 
-    # 2) Collect JSON for assistant + DM (now that upstream is done)
-    last_mon, last_sun = last_monday_and_sunday_cst()
+    # 1) Run the pipeline for that week
+    cadence = run_weekly_pipeline(selected_week_end_date)
+
+    # 2) Collect JSON for assistant + DM (read-only where possible)
     collection_jobs = [
         ("/attendance/process-sheet", "Adult attendance processing"),
-        #(f"/planning-center/checkins?date={last_sun}", "Planning Center check-ins"),
-        (f"/planning-center/checkins-location/rollup-day?svc_date={last_sun}", "Planning Center check-ins"),
-        (f"/planning-center/giving/weekly-summary?week_end={last_sun}", "Planning Center Giving Summary"),
+        (f"/planning-center/checkins-location/day/{last_sun}", "Planning Center check-ins"),
+        (f"/planning-center/giving/weekly-summary?start={last_mon}&end={last_sun}", "Planning Center Giving Summary"),
         ("/planning-center/groups", "Planning Center Groups"),
         ("/planning-center/serving/summary", "Planning Center Volunteer Summary"),
         ("/youtube/livestreams", "YouTube livestream tracking"),
@@ -348,17 +393,14 @@ def main():
 
     outputs: dict[str, object] = {}
     for endpoint, label in collection_jobs:
-        if label == "Planning Center check-ins":
-            raw = post_job(endpoint, label, 600)
-        else:
-            raw = call_job(endpoint, label, 600)
+        # Prefer GET for reads. If your rollup route is POST-only, flip this back.
+        raw = call_job(endpoint, label, 600)
         outputs[label] = _json_or_empty(raw)
         time.sleep(0.5)
 
-    # Enrich with unplaced/skipped for DM section
+    # Enrich with unplaced/skipped for DM
     try:
-        last_sun_str = str(cadence.get("week_end"))
-        skipped = fetch_unplaced_for_date(last_sun_str)
+        skipped = fetch_unplaced_for_date(str(last_sun))
         if skipped:
             chk = outputs.get("Planning Center check-ins") or {}
             dbg = chk.get("debug") or {}
@@ -369,7 +411,7 @@ def main():
     except Exception:
         log.exception("Could not attach unplaced check-ins")
 
-    # 3) TEAM summary via Assistant (strict order)
+    # 3) TEAM summary via Assistant
     team_prompt = build_team_prompt(outputs, cadence)
     log.info("🧠 Assistant input:\n%s", team_prompt[:1000] + ("…" if len(team_prompt) > 1000 else ""))
     summary = run_assistant_with_tools(team_prompt)
@@ -392,6 +434,7 @@ def main():
                 log.info("📤 Sent %d DM message(s)", len(dm_messages))
         except Exception as e:
             log.error("Skipping DMs due to DB/token error: %s", e)
+
 
 if __name__ == "__main__":
     main()
