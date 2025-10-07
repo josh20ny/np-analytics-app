@@ -13,6 +13,7 @@ from config import TAB_CONFIG, TABLE_FILTERS
 from widgets.core import ranged_table, format_display_dates
 from widgets.legacy import (
     overlay_years_chart,
+    per_service_location_bars,
     weekly_yoy_table,
     pie_chart,
     kpi_card,
@@ -275,6 +276,32 @@ for tab_obj, tab_name in zip(tabs, tab_names):
             
             # Skip the generic ranged_table for this tab
             continue
+
+        elif tab_name in ("InsideOut Attendance", "Transit Attendance", "UpStreet Attendance", "Waumba Land Attendance"):
+            # Map tab to ministry_key used in your locations view
+            ministry_map = {
+                "InsideOut Attendance": "InsideOut",
+                "Transit Attendance": "Transit",
+                "UpStreet Attendance": "UpStreet",
+                "Waumba Land Attendance": "Waumba Land",
+            }
+            ministry = ministry_map[tab_name]
+
+            # Pull the labeled daily location rows for this ministry
+            sql = text("""
+                SELECT date, ministry_key, service_bucket, location_name, total_attendance, total_new
+                FROM attendance_by_location_daily_labeled
+                WHERE ministry_key = :ministry
+                ORDER BY date DESC
+            """)
+            with engine.connect() as c:
+                df_loc = pd.read_sql(sql, c, params={"ministry": ministry}, parse_dates=["date"])
+
+            if df_loc.empty:
+                st.info(f"No location rows for {ministry}.")
+            else:
+                st.markdown("### Rooms / Groups — Most Recent Sunday")
+                per_service_location_bars(df_loc, title_prefix=ministry)
 
         if table_name and table_name != "__service__" and date_col_all:
             flt = (TABLE_FILTERS or {}).get(tab_name, {})

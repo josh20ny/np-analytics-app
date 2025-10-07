@@ -231,4 +231,63 @@ def filter_meaningful_rows(df: pd.DataFrame, metric_col: str | None = None, min_
     # Filter by threshold (treat NaN as 0)
     return df[df[metric_col].fillna(0) >= min_value]
 
+def per_service_location_bars(df: pd.DataFrame, title_prefix: str = ""):
+    """
+    Render one bar chart per service for the most recent date in df.
+    Expects columns: date (datetime), ministry_key, service_bucket,
+                     location_name, total_attendance.
+    """
+    if df is None or df.empty:
+        st.info("No location data.")
+        return
 
+    # Guard columns
+    needed = {"date", "service_bucket", "location_name", "total_attendance"}
+    if not needed.issubset(df.columns):
+        st.warning(f"Missing columns for location bars: {needed - set(df.columns)}")
+        return
+
+    # Find the most recent date present
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    most_recent = df["date"].max()
+    if pd.isna(most_recent):
+        st.info("No recent date found.")
+        return
+
+    latest = df[df["date"] == most_recent].copy()
+    if latest.empty:
+        st.info("No rows for the most recent date.")
+        return
+
+    st.subheader((title_prefix + " " if title_prefix else "") + most_recent.strftime("%A, %B %d, %Y"))
+
+    # One chart per service
+    for svc in sorted(latest["service_bucket"].dropna().unique()):
+        d = latest[latest["service_bucket"] == svc].copy()
+        if d.empty:
+            continue
+        # Sort by attendance
+        d = d.sort_values("total_attendance", ascending=False)
+        d["location_name"] = d["location_name"].astype(str)
+
+        st.markdown(f"**Service:** {svc}")
+        chart = (
+            alt.Chart(d)
+              .mark_bar()
+              .encode(
+                  x=alt.X("location_name:N", sort="-y", title="Group"),
+                  y=alt.Y("total_attendance:Q", title="Attendance"),
+                  tooltip=["location_name", "total_attendance"]
+              )
+              .properties(width="container", height=300)
+        )
+        # Add labels
+        text = chart.mark_text(
+            align="left",
+            baseline="middle",
+            dx=3
+        ).encode(
+            text="total_attendance:Q"
+        )
+        st.altair_chart(chart + text, use_container_width=True)
