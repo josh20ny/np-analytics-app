@@ -79,18 +79,21 @@ def weekly_summary():
     try:
         for item in results:
             cur.execute("""
-                INSERT INTO mailchimp_weekly_summary (week_start, week_end, audience_name, audience_id, email_count, open_rate_mpp_excluded, click_rate)
+                INSERT INTO mailchimp_weekly_summary
+                (week_start, week_end, audience_name, audience_id, email_count, avg_open_rate, avg_click_rate)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (week_start, audience_id)
-                DO UPDATE SET email_count = EXCLUDED.email_count,
-                              open_rate_mpp_excluded = EXCLUDED.open_rate_mpp_excluded,
-                              click_rate = EXCLUDED.click_rate
+                DO UPDATE SET
+                email_count    = EXCLUDED.email_count,
+                avg_open_rate  = EXCLUDED.avg_open_rate,
+                avg_click_rate = EXCLUDED.avg_click_rate
             """, (
-                week_start, week_end, item["audience"],
+                week_start, week_end,
+                item["audience"],
                 AUDIENCES[item["audience"]],
                 item["num_emails"],
-                item["avg_open_rate"],
-                item["avg_click_rate"],
+                item["avg_open_rate"],    # already computed a few lines above
+                item["avg_click_rate"],   # already computed a few lines above
             ))
         conn.commit()
     finally:
