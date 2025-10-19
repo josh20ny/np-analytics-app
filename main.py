@@ -3,6 +3,7 @@ from fastapi import FastAPI
 
 # App routers
 from app.google_sheets import router as sheets_router
+from app.services.routes_ga import router as ga_router
 from app.attendance import router as attendance_router
 from app.mailchimp import router as mailchimp_router
 
@@ -89,6 +90,7 @@ app.include_router(cu_oauth_router)
 
 # YouTube
 app.include_router(youtube_router)
+app.include_router(ga_router)
 
 # Optional extras if present
 # app.include_router(assistant_router)

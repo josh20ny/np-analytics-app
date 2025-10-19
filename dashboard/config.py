@@ -113,6 +113,8 @@ TAB_CONFIG = {
          "args": {"title": "Click Rate YoY by Week"}},
     ],
 
+    "Website": [],
+
     "Giving": [
         {"loader": ("weekly_giving_summary", "week_end", "total_giving"),
          "widget": overlay_years_chart,

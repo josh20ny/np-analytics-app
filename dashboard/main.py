@@ -21,6 +21,7 @@ from widgets.legacy import (
 from widgets.weekly import weekly_summary_view
 from widgets.rolling import rolling_average_chart
 from widgets.giving_ytd import giving_ytd_bar
+from widgets.website import website_tab
 
 from lib.auth import (
     login_gate,
@@ -335,6 +336,9 @@ for tab_obj, tab_name in zip(tabs, tab_names):
                 agg="mean",
                 key_suffix=tab_name.replace(" ", "_").lower(),
             )
+
+        if tab_name == "Website":
+            website_tab()
 
         # ── Widgets render loop ───────────────────────────────────────────────
         for meta in widgets:
