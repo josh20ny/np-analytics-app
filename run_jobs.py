@@ -2,7 +2,9 @@
 import os, time, json, logging, requests, argparse
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, date
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
+from sqlalchemy.types import DATE
+from datetime import date
 import math
 
 from dotenv import load_dotenv
@@ -184,6 +186,7 @@ def fetch_unplaced_for_date(target_sunday: str) -> list[dict]:
     """
     rows = []
     with SessionLocal() as db:
+        d = date.fromisoformat(target_sunday)  # e.g., "2025-10-19" -> date(2025,10,19)
         sql = text("""
             SELECT
               checkin_id,
@@ -192,10 +195,10 @@ def fetch_unplaced_for_date(target_sunday: str) -> list[dict]:
               reason_codes,
               details
             FROM pco_checkins_unplaced
-            WHERE (created_at_pco AT TIME ZONE 'America/Chicago')::date = (:d:):date
+            WHERE (created_at_pco AT TIME ZONE 'America/Chicago')::date = :d
             ORDER BY created_at_pco
-        """)
-        for r in db.execute(sql, {"d": target_sunday}).mappings().all():
+        """).bindparams(bindparam("d", type_=DATE))
+        for r in db.execute(sql, {"d": d}).mappings().all():
             rows.append(dict(r))
     return rows
 
@@ -286,16 +289,16 @@ def build_team_prompt(outputs: dict, cadence: dict) -> str:
         ("Groups Summary",                                     outputs.get("Planning Center Groups")),
         ("Engaged Summary",                                    engaged or {"note": "no engaged data"}),
         ("Front Door Summary",                                 front_door or {"note": "no front door data"}),
-        ("YouTube Livestreams Summary",                        outputs.get("YouTube weekly summary")),
     ]
     parts = [
         "You are NP Analytics’ reporting assistant.",
         "Compose a clear, concise weekly update for the team. Use the sections below in THIS EXACT ORDER.",
         "Rules:",
-        "- Use short headings and 2–4 bullet points per section.",
+        "- Use short headings and provide all relevant data.",
         "- Keep numbers accurate; do not invent fields.",
         "- If a section is missing, write “No data this week.”",
         "- Keep it readable for non-technical staff.",
+        "- Provide a short summary 1-2 sentence summary at the end of each section based on the data you see."
         "",
     ]
     for title, blob in sections:
