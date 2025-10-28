@@ -90,6 +90,13 @@ def resolve_week_window(week_end_str: str | None) -> tuple[date, date]:
     week_start = week_end - timedelta(days=6)
     return week_start, week_end
 
+def _json_default(o):
+    from datetime import date, datetime, time
+    if isinstance(o, (datetime, date, time)):
+        return o.isoformat()
+    return str(o)
+
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 log = logging.getLogger("run_jobs")
 logging.basicConfig(
@@ -302,13 +309,13 @@ def build_team_prompt(outputs: dict, cadence: dict) -> str:
         "",
     ]
     for title, blob in sections:
-        j = json.dumps(blob, ensure_ascii=False, indent=2) if blob is not None else "null"
+        j = json.dumps(blob, ensure_ascii=False, indent=2, default=_json_default) if blob is not None else "null"
         parts.append(f"### {title}\n```json\n{j}\n```")
     return "\n".join(parts)
 
 # ── DM payloads (chunk long people lists) ─────────────────────────────────────
 def _codeblock(obj) -> str:
-    return "```json\n" + json.dumps(obj, ensure_ascii=False, indent=2) + "\n```"
+    return "```json\n" + json.dumps(obj, ensure_ascii=False, indent=2, default=_json_default) + "\n```"
 
 def build_dm_messages(outputs: dict, cadence: dict) -> list[str]:
     msgs = []
