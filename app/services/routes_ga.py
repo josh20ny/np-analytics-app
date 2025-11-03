@@ -1,7 +1,11 @@
 # app/routes_ga.py
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from typing import List, Dict
 import asyncpg
+from datetime import date, timedelta
+from sqlalchemy import text
+
+from .ga4 import run_report
 
 from app.db import get_conn  # <-- use psycopg2 connection (matches attendance code)
 from app.utils.common import get_previous_week_dates_cst
@@ -16,6 +20,14 @@ def _num(val, to_int=False):
         return int(f) if to_int else f
     except Exception:
         return 0 if to_int else 0.0
+    
+def _last_full_sunday(today: date) -> date:
+    # Sunday is week_end. If today is Sunday, take last Sunday (a week ago) as "full".
+    off = (today.weekday() + 1) % 7  # Monday=0,... Sunday=6; convert to 0..6 with Sun at 0
+    sunday = today - timedelta(days=off+1) if off == 0 else today - timedelta(days=off+1)
+    # The expression can be simplified; the goal is "most recent Sunday before today".
+    # Feel free to reuse your existing week calc helper if you already wrote one.
+    return sunday
 
 # -------------------- UPSERT HELPERS --------------------
 
@@ -82,7 +94,7 @@ async def upsert_conversions(conn: asyncpg.Connection, week_end: str, week_start
 
 # -------------------- MAIN ROUTE --------------------
 
-@router.post("/sync-week")
+@router.api_route("/sync-week", methods=["GET", "POST"])
 def sync_last_full_week():
     if not GA4_PROPERTY_ID:
         return {"ok": False, "error": "GA4_PROPERTY_ID not set"}
@@ -225,3 +237,169 @@ def sync_last_full_week():
         "give": give_count,
         "next_step": next_step_count
     }
+
+@router.post("/backfill")
+def backfill_ga4(
+    start: date = Query(..., description="Inclusive Monday (week_start)"),
+    end: date | None = Query(None, description="Exclusive end date (defaults to the Monday after the last full Sunday)")
+):
+    """
+    Backfill GA4 weekly website data into:
+      - website_weekly_summary
+      - website_page_views_weekly
+      - website_channel_group_weekly
+      - website_device_weekly
+      - website_conversions_weekly
+
+    Iterates Monday..Sunday windows. Idempotent via ON CONFLICT on week_end.
+    """
+    if not GA4_PROPERTY_ID:
+        return {"ok": False, "error": "GA4_PROPERTY_ID not set"}
+
+    # Compute default end (exclusive) as the Monday after the most recent full Sunday
+    today = date.today()
+    # most recent Sunday before today
+    most_recent_sunday = today - timedelta(days=((today.weekday() + 1) % 7) + 1)
+    default_end_exclusive = most_recent_sunday + timedelta(days=1)  # Monday after that Sunday
+    end_exclusive = end or default_end_exclusive
+
+    # Ensure start is a Monday (your helper does this elsewhere; here we just trust the input)
+    d = start
+    weeks = 0
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        while d < end_exclusive:
+            week_start = d
+            week_end = d + timedelta(days=6)
+
+            # 1) SUMMARY (totals) — pass dimensions=[]
+            srows = run_report(
+                dimensions=[],
+                metrics=["activeUsers", "screenPageViews", "userEngagementDuration"],
+                start_date=week_start.isoformat(),
+                end_date=week_end.isoformat(),
+            )
+            s = srows[0] if srows else {}
+            users = int(float(s.get("activeUsers", 0) or 0))
+            page_views = int(float(s.get("screenPageViews", 0) or 0))
+            total_eng = float(s.get("userEngagementDuration", 0) or 0.0)
+            avg_eng = (total_eng / users) if users > 0 else 0.0
+
+            cur.execute("""
+                INSERT INTO website_weekly_summary
+                  (week_end, week_start, users, page_views, avg_engagement_time_sec)
+                VALUES (%s,%s,%s,%s,%s)
+                ON CONFLICT (week_end) DO UPDATE
+                  SET users=EXCLUDED.users,
+                      page_views=EXCLUDED.page_views,
+                      avg_engagement_time_sec=EXCLUDED.avg_engagement_time_sec
+            """, (week_end, week_start, users, page_views, avg_eng))
+
+            # 2) PER-PAGE VIEWS (by pageTitle)
+            page_rows = run_report(
+                dimensions=["pageTitle"],
+                metrics=["screenPageViews"],
+                start_date=week_start.isoformat(),
+                end_date=week_end.isoformat(),
+            )
+            for r in page_rows:
+                title = (r.get("pageTitle") or "(untitled)").strip()
+                views = int(float(r.get("screenPageViews", 0) or 0))
+                cur.execute("""
+                    INSERT INTO website_page_views_weekly
+                      (week_end, week_start, page_key, page_title, views)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT (week_end, page_key) DO UPDATE
+                      SET page_title=EXCLUDED.page_title,
+                          views=EXCLUDED.views
+                """, (week_end, week_start, title, title, views))
+
+            # 3) CHANNEL GROUP (sessionDefaultChannelGroup)
+            chan_rows = run_report(
+                dimensions=["sessionDefaultChannelGroup"],
+                metrics=["activeUsers", "screenPageViews"],
+                start_date=week_start.isoformat(),
+                end_date=week_end.isoformat(),
+            )
+            for r in chan_rows:
+                cg = (r.get("sessionDefaultChannelGroup") or r.get("defaultChannelGroup") or "(other)").strip()
+                au = int(float(r.get("activeUsers", 0) or 0))
+                spv = int(float(r.get("screenPageViews", 0) or 0))
+                cur.execute("""
+                    INSERT INTO website_channel_group_weekly
+                      (week_end, week_start, channel_group, users, page_views)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT (week_end, channel_group) DO UPDATE
+                      SET users=EXCLUDED.users,
+                          page_views=EXCLUDED.page_views
+                """, (week_end, week_start, cg, au, spv))
+
+            # 4) DEVICES
+            dev_rows = run_report(
+                dimensions=["deviceCategory"],
+                metrics=["sessions", "activeUsers", "screenPageViews"],
+                start_date=week_start.isoformat(),
+                end_date=week_end.isoformat(),
+            )
+            for r in dev_rows:
+                dev = (r.get("deviceCategory") or "(unknown)").strip()
+                sess = int(float(r.get("sessions", 0) or 0))
+                au   = int(float(r.get("activeUsers", 0) or 0))
+                spv  = int(float(r.get("screenPageViews", 0) or 0))
+                cur.execute("""
+                    INSERT INTO website_device_weekly
+                      (week_end, week_start, device_category, sessions, users, page_views)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (week_end, device_category) DO UPDATE
+                      SET sessions=EXCLUDED.sessions,
+                          users=EXCLUDED.users,
+                          page_views=EXCLUDED.page_views
+                """, (week_end, week_start, dev, sess, au, spv))
+
+            # 5) CONVERSIONS (outbound clicks → give vs next_step)
+            outbound_rows = run_report(
+                dimensions=["linkDomain"],
+                metrics=["eventCount"],
+                start_date=week_start.isoformat(),
+                end_date=week_end.isoformat(),
+                dimension_filters={
+                    "eventName": ["click"],
+                    "outbound": ["true"],
+                },
+            )
+            give_count = 0
+            next_step_count = 0
+            for r in outbound_rows:
+                domain = (r.get("linkDomain") or "").lower()
+                cnt = int(float(r.get("eventCount", 0) or 0))
+                if any(domain.endswith(d) or domain == d for d in GA4_GIVING_DOMAINS):
+                    give_count += cnt
+                else:
+                    next_step_count += cnt
+
+            cur.execute("""
+                INSERT INTO website_conversions_weekly
+                  (week_end, week_start, conversion_type, event_count)
+                VALUES (%s,%s,%s,%s)
+                ON CONFLICT (week_end, conversion_type) DO UPDATE
+                  SET event_count=EXCLUDED.event_count
+            """, (week_end, week_start, "give", give_count))
+            cur.execute("""
+                INSERT INTO website_conversions_weekly
+                  (week_end, week_start, conversion_type, event_count)
+                VALUES (%s,%s,%s,%s)
+                ON CONFLICT (week_end, conversion_type) DO UPDATE
+                  SET event_count=EXCLUDED.event_count
+            """, (week_end, week_start, "next_step", next_step_count))
+
+            weeks += 1
+            d += timedelta(days=7)
+
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+    return {"ok": True, "weeks_synced": weeks, "start": start.isoformat(), "end_exclusive": end_exclusive.isoformat()}

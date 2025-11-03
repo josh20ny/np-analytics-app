@@ -38,6 +38,7 @@ JOBS = [
     ("/youtube/livestreams",                    "YouTube livestream tracking"),
     ("/mailchimp/weekly-summary",               "Mailchimp weekly summary"),
     (f"/mailchimp/weekly-refresh",              "Mailchimp weekly refresh POST"),
+    ("/ga4/sync-week",                          "Google Analytics weekly POST"), 
 ]
 
 # Endpoint-specific read timeouts (seconds)
@@ -399,6 +400,7 @@ def main():
         ("/youtube/livestreams", "YouTube livestream tracking"),
         ("/youtube/weekly-summary", "YouTube weekly summary"),
         ("/mailchimp/weekly-summary", "Mailchimp weekly summary"),
+        ("/ga4/sync-week", "Google Analytics weekly"), 
     ]
 
     outputs: dict[str, object] = {}

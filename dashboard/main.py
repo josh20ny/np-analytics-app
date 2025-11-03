@@ -101,6 +101,9 @@ for tab_obj, tab_name in zip(tabs, tab_names):
             weekly_summary_view()
             continue
         
+        if tab_name == "Website":
+            website_tab()
+            continue
 
     with tab_obj:
         # Admin tab
@@ -336,9 +339,6 @@ for tab_obj, tab_name in zip(tabs, tab_names):
                 agg="mean",
                 key_suffix=tab_name.replace(" ", "_").lower(),
             )
-
-        if tab_name == "Website":
-            website_tab()
 
         # ── Widgets render loop ───────────────────────────────────────────────
         for meta in widgets:
